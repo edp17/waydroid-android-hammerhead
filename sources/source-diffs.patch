@@ -1,0 +1,601 @@
+===== device/lge/hammerhead =====
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 2de6c46..6f2f6e5 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -149,4 +149,16 @@ TARGET_USES_NON_LEGACY_POWERHAL := true
+ # Legacy memfd
+ TARGET_HAS_MEMFD_BACKPORT := true
+ 
++# BEGIN Hammerhead Waydroid Mesa/GBM gralloc selection
++# Hammerhead uses Qualcomm gralloc.msm8974; do not build the unrelated
++# generic Waydroid gralloc.gbm module or require libgbm_mesa.
++TARGET_USE_MESA := false
++# END Hammerhead Waydroid Mesa/GBM gralloc selection
++
++# BEGIN Hammerhead Android 11 legacy header-copy compatibility
++# msm8974 display/libgralloc still exports gralloc_priv.h via
++# LOCAL_COPY_HEADERS, which Android 11 rejects unless explicitly allowed.
++BUILD_BROKEN_USES_BUILD_COPY_HEADERS := true
++# END Hammerhead Android 11 legacy header-copy compatibility
++
+ -include vendor/lge/hammerhead/BoardConfigVendor.mk
+diff --git a/camera/mm-image-codec/qomx_core/qomx_core.c b/camera/mm-image-codec/qomx_core/qomx_core.c
+index c58bbff..d6fc7c8 100644
+--- a/camera/mm-image-codec/qomx_core/qomx_core.c
++++ b/camera/mm-image-codec/qomx_core/qomx_core.c
+@@ -195,8 +195,6 @@ OMX_API OMX_ERRORTYPE OMX_APIENTRY OMX_GetHandle(
+ 
+   if (FALSE == p_core_comp->open) {
+     /*
+-     * WD-CAM3ZR:
+-     *
+      * The hammerhead JPEG implementation depends on the legacy
+      * libmmjpeg.so blob, which contains ARM text relocations. Android
+      * rejects those relocations for a process target SDK >= 23.
+@@ -216,7 +214,8 @@ OMX_API OMX_ERRORTYPE OMX_APIENTRY OMX_GetHandle(
+     if (NULL == set_target_sdk) {
+       const char *setter_error = dlerror();
+ 
+-      ALOGE("WD-CAM3ZR: cannot resolve target-SDK setter: %s",
++      ALOGE("%s:%d] Cannot resolve target-SDK setter: %s",
++        __func__, __LINE__,
+         (NULL != setter_error) ? setter_error : "unknown dlsym error");
+       rc = OMX_ErrorInvalidComponent;
+       goto error;
+@@ -226,8 +225,6 @@ OMX_API OMX_ERRORTYPE OMX_APIENTRY OMX_GetHandle(
+       android_get_application_target_sdk_version();
+ 
+     if (original_target_sdk >= 23) {
+-      ALOGW("WD-CAM3ZR: lowering target SDK %d -> 22 for %s",
+-        original_target_sdk, p_core_comp->lib_name);
+       set_target_sdk(22);
+       target_sdk_changed = OMX_TRUE;
+     }
+@@ -239,15 +236,13 @@ OMX_API OMX_ERRORTYPE OMX_APIENTRY OMX_GetHandle(
+     if (NULL == p_core_comp->lib_handle) {
+       const char *load_error = dlerror();
+ 
+-      ALOGE("WD-CAM3ZR: cannot load %s: %s",
+-        p_core_comp->lib_name,
++      ALOGE("%s:%d] Cannot load %s: %s",
++        __func__, __LINE__, p_core_comp->lib_name,
+         (NULL != load_error) ? load_error : "unknown dlopen error");
+ 
+       if (OMX_TRUE == target_sdk_changed) {
+         set_target_sdk(original_target_sdk);
+         target_sdk_changed = OMX_FALSE;
+-        ALOGI("WD-CAM3ZR: restored target SDK to %d",
+-          original_target_sdk);
+       }
+ 
+       rc = OMX_ErrorInvalidComponent;
+@@ -257,11 +252,6 @@ OMX_API OMX_ERRORTYPE OMX_APIENTRY OMX_GetHandle(
+     if (OMX_TRUE == target_sdk_changed) {
+       set_target_sdk(original_target_sdk);
+       target_sdk_changed = OMX_FALSE;
+-      ALOGI("WD-CAM3ZR: loaded %s and restored target SDK to %d",
+-        p_core_comp->lib_name, original_target_sdk);
+-    } else {
+-      ALOGI("WD-CAM3ZR: loaded %s at target SDK %d",
+-        p_core_comp->lib_name, original_target_sdk);
+     }
+ 
+     p_core_comp->open = TRUE;
+
+===== hardware/qcom/display =====
+diff --git a/msm8974/libgralloc/mapper.cpp b/msm8974/libgralloc/mapper.cpp
+index 15831e3b68..7e440eb88a 100644
+--- a/msm8974/libgralloc/mapper.cpp
++++ b/msm8974/libgralloc/mapper.cpp
+@@ -41,6 +41,10 @@
+ #include "memalloc.h"
+ #include <qdMetaData.h>
+ 
++#ifdef VENUS_COLOR_FORMAT
++#include <media/msm_media_info.h>
++#endif
++
+ using namespace gralloc;
+ /*****************************************************************************/
+ 
+@@ -251,7 +255,7 @@ int gralloc_lock_ycbcr(gralloc_module_t const* module,
+ {
+     private_handle_t* hnd = (private_handle_t*)handle;
+     int err = gralloc_map_and_invalidate(module, handle, usage, l, t, w, h);
+-    int ystride, cstride;
++    int ystride, cstride, logical_height;
+ 
+     memset(ycbcr->reserved, 0, sizeof(ycbcr->reserved));
+     if(!err) {
+@@ -266,6 +270,37 @@ int gralloc_lock_ycbcr(gralloc_module_t const* module,
+                 ycbcr->cstride = ystride;
+                 ycbcr->chroma_step = 2;
+                 break;
++            case HAL_PIXEL_FORMAT_NV12_ENCODEABLE:
++#ifdef VENUS_COLOR_FORMAT
++                ystride = VENUS_Y_STRIDE(COLOR_FMT_NV12, hnd->width);
++                cstride = VENUS_UV_STRIDE(COLOR_FMT_NV12, hnd->width);
++#else
++                ystride = cstride = hnd->width;
++#endif
++                /*
++                 * Codec2 locks the full logical crop (for example 1920x1080),
++                 * while this legacy private handle may describe an allocation
++                 * with Venus-aligned geometry (for example 1920x1088).
++                 *
++                 * The hammerhead camera writes VU chroma directly after the
++                 * logical Y rows. Using the aligned Y scanline count therefore
++                 * advances the chroma pointer by eight 1920-byte rows and
++                 * produces eight zero chroma rows at the end of a 1080p frame.
++                 */
++                logical_height =
++                        (t == 0 && h > 0 && h <= hnd->height)
++                        ? h : hnd->height;
++
++                ycbcr->y  = (void*)hnd->base;
++                ycbcr->cr =
++                        (void*)(hnd->base + ystride * logical_height);
++                ycbcr->cb =
++                        (void*)(hnd->base + ystride * logical_height + 1);
++                ycbcr->ystride = ystride;
++                ycbcr->cstride = cstride;
++                ycbcr->chroma_step = 2;
++                break;
++
+             case HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS:
+                 ystride = cstride = hnd->width;
+                 ycbcr->y  = (void*)hnd->base;
+
+===== hardware/waydroid =====
+diff --git a/hwcomposer/gralloc_handler.cpp b/hwcomposer/gralloc_handler.cpp
+index a86b9aa..fac05e1 100644
+--- a/hwcomposer/gralloc_handler.cpp
++++ b/hwcomposer/gralloc_handler.cpp
+@@ -64,7 +64,12 @@ namespace {
+     }
+ 
+     const wl_buffer_listener buffer_listener {
+-        [](void *, struct wl_buffer *) {}
++        [](void *data, struct wl_buffer *) {
++            auto *buf = static_cast<buffer *>(data);
++            if (buf) {
++                buf->mark_released();
++            }
++        }
+     };
+ }
+ std::unique_ptr<buffer> create_shm_wl_buffer(display *display, const buffer_metadata& metadata, buffer_handle_t handle) {
+@@ -93,7 +98,7 @@ std::unique_ptr<buffer> create_shm_wl_buffer(display *display, const buffer_meta
+     }
+     struct wl_shm_pool *pool = wl_shm_create_pool(display->shm, fd, size);
+     buf->wl_buffer = wl_shm_pool_create_buffer(pool, 0, metadata.width, metadata.height, shm_stride, shm_format);
+-    wl_buffer_add_listener(buf->wl_buffer, &buffer_listener, nullptr);
++    wl_buffer_add_listener(buf->wl_buffer, &buffer_listener, buf.get());
+     wl_shm_pool_destroy(pool);
+     close(fd);
+ 
+@@ -183,7 +188,7 @@ std::unique_ptr<buffer> create_dmabuf_wl_buffer(display *display, const buffer_m
+     zwp_linux_buffer_params_v1_add_listener(params, &params_listener, nullptr);
+ 
+     buf->wl_buffer = zwp_linux_buffer_params_v1_create_immed(params, buf->metadata.width, buf->metadata.height, drm_format, 0);
+-    wl_buffer_add_listener(buf->wl_buffer, &buffer_listener, nullptr);
++    wl_buffer_add_listener(buf->wl_buffer, &buffer_listener, buf.get());
+ 
+     return buf;
+ }
+@@ -209,7 +214,7 @@ std::unique_ptr<buffer> create_android_wl_buffer(display *display, const buffer_
+     buf->wl_buffer = android_wlegl_create_buffer(display->android_wlegl, buf->metadata.width, buf->metadata.height, buf->metadata.pixel_stride, metadata.format, GRALLOC_USAGE_HW_RENDER, wlegl_handle);
+     android_wlegl_handle_destroy(wlegl_handle);
+ 
+-    wl_buffer_add_listener(buf->wl_buffer, &buffer_listener, nullptr);
++    wl_buffer_add_listener(buf->wl_buffer, &buffer_listener, buf.get());
+ 
+     return buf;
+ }
+diff --git a/hwcomposer/hwcomposer.cpp b/hwcomposer/hwcomposer.cpp
+index ca16438..f9c0be8 100644
+--- a/hwcomposer/hwcomposer.cpp
++++ b/hwcomposer/hwcomposer.cpp
+@@ -30,7 +30,6 @@
+ #include <string>
+ #include <sstream>
+ #include <functional>
+-
+ #include <log/log.h>
+ #include <cutils/properties.h>
+ #include <hardware/hwcomposer.h>
+@@ -86,6 +85,7 @@ namespace {
+         return src;
+     }
+ 
++
+     buffer *find_cached_buffer(waydroid_hwc_composer_device_1 *pdev, const buffer_metadata &metadata, buffer_handle_t handle) {
+         auto it = pdev->display->buffer_map.find(handle);
+         if (it != pdev->display->buffer_map.end()) {
+@@ -121,8 +121,59 @@ namespace {
+             buf = emplace_result.first->second.get();
+         }
+ 
+-        if (buf->isShm)
++        if (buf->isShm) {
++            /*
++             * A wl_shm buffer remains owned by the compositor until the
++             * compositor sends wl_buffer.release.  The old release listener
++             * ignored that event and update_shm_buffer() overwrote the same
++             * mapping while Lipstick could still be scanning it out.
++             *
++             * Wait for the previous presentation to release this mirror
++             * before writing the next Android frame into it.  Refuse the copy
++             * after a bounded wait rather than corrupting the displayed frame.
++             */
++            constexpr auto releaseWait =
++                std::chrono::milliseconds(250);
++            const bool compositor_released =
++                buf->wait_for_compositor_release(releaseWait);
++
++            if (!compositor_released) {
++                ALOGE("Refusing busy SHM overwrite after compositor-release timeout");
++                return nullptr;
++            }
++
++            /*
++             * The SHM mirror is populated by reading the Android buffer on
++             * the CPU.  The producer owns that buffer until acquireFenceFd
++             * signals, so waiting only later, immediately before the Wayland
++             * commit, is too late: it allows us to copy a partially rendered
++             * frame.
++             *
++             * Keep the existing later wait for now so non-SHM paths retain
++             * their current ordering and return semantics.  A signalled sync
++             * fence may be waited more than once.
++             */
++            constexpr int preCopyFenceWaitMS = 100;
++            int wait_result = 0;
++            int wait_errno = 0;
++
++            if (layer->acquireFenceFd != -1) {
++                wait_result = sync_wait(
++                    layer->acquireFenceFd,
++                    preCopyFenceWaitMS);
++                if (wait_result < 0) {
++                    wait_errno = errno;
++                }
++            }
++
++            if (wait_result < 0) {
++                ALOGE("Refusing incomplete SHM copy: fence=%d rc=%d errno=%d",
++                      layer->acquireFenceFd, wait_result, wait_errno);
++                return nullptr;
++            }
++
+             gralloc_handler.update_shm_buffer(pdev->display, buf);
++        }
+         return buf;
+     }
+ 
+@@ -317,14 +368,31 @@ bool is_blacklisted(struct waydroid_hwc_composer_device_1* pdev, const std::stri
+ 
+ static void apply_surface_damage(hwc_layer_1 *hwc_layer, surface_context &surface_context) {
+     auto &surface_damage = hwc_layer->surfaceDamage;
++    const uint32_t surface_version = wl_surface_get_version(surface_context.surface);
++    const bool supports_buffer_damage =
++        surface_version >= WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION;
++
++    if (surface_damage.numRects == 0) {
++        if (supports_buffer_damage) {
++            surface_context.damage_buffer(0, 0, INT32_MAX, INT32_MAX);
++        } else {
++            surface_context.damage_surface(0, 0, INT32_MAX, INT32_MAX);
++        }
++        return;
++    }
+ 
+-    if (surface_damage.numRects == 0
+-        || wl_surface_get_version(surface_context.surface) < WL_SURFACE_DAMAGE_BUFFER_SINCE_VERSION) {
++    if (!supports_buffer_damage) {
++        // HWC surfaceDamage rectangles are expressed in source-buffer
++        // coordinates. wl_surface_damage() uses surface-local coordinates,
++        // which differ after buffer transforms. On old wl_surface versions,
++        // invalidate the complete surface rather than applying wrong-space
++        // partial rectangles.
+         surface_context.damage_surface(0, 0, INT32_MAX, INT32_MAX);
++        return;
+     }
+ 
+     std::for_each(surface_damage.rects, surface_damage.rects + surface_damage.numRects, [&](const auto &rect){
+-        surface_context.damage_surface(
++        surface_context.damage_buffer(
+             rect.left,
+             rect.top,
+             rect.right - rect.left,
+@@ -336,7 +404,6 @@ static void apply_surface_damage(hwc_layer_1 *hwc_layer, surface_context &surfac
+ static int apply_hwc_layer_to_surface_context(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1 *hwc_layer, size_t hwc_layer_index, surface_context &surface_context, buffer *buf = nullptr) {
+     constexpr int acquireWarningMS = 100;
+     int res = -1;
+-
+     if (!buf) {
+         buf = get_wl_buffer(pdev, hwc_layer, hwc_layer_index);
+         if (!buf) {
+@@ -345,8 +412,24 @@ static int apply_hwc_layer_to_surface_context(waydroid_hwc_composer_device_1 *pd
+         }
+     }
+ 
+-    // TODO: Implement per-hwc_layer explicit synchronization
++    /*
++     * DMA-BUFs are passed directly to the Wayland compositor.  Android must
++     * not reuse the producer buffer until Lipstick sends wl_buffer.release.
++     * Return a per-buffer sw_sync fence which mark_released() signals from
++     * that callback.  SHM mirrors remain immediately reusable by Android
++     * because their contents have already been copied.
++     */
+     hwc_layer->releaseFenceFd = -1;
++    if (!buf->isShm) {
++        hwc_layer->releaseFenceFd =
++            buf->create_android_release_fence();
++        if (hwc_layer->releaseFenceFd < 0) {
++            ALOGE("Failed to prepare DMA-BUF release fence for layer %zu",
++                  hwc_layer_index);
++            res = -1;
++            goto out;
++        }
++    }
+ 
+     surface_context.attach_buffer(*buf);
+     apply_surface_damage(hwc_layer, surface_context);
+@@ -371,6 +454,9 @@ static int apply_hwc_layer_to_surface_context(waydroid_hwc_composer_device_1 *pd
+         res = 0;
+     }
+ 
++    if (buf->isShm) {
++        buf->mark_attached();
++    }
+     wl_surface_commit(surface_context.surface);
+ 
+ out:
+diff --git a/hwcomposer/wayland-hwc.cpp b/hwcomposer/wayland-hwc.cpp
+index 4f37e60..1968f60 100644
+--- a/hwcomposer/wayland-hwc.cpp
++++ b/hwcomposer/wayland-hwc.cpp
+@@ -84,8 +84,106 @@ using ::android::hardware::hidl_string;
+ 
+ struct buffer;
+ 
++bool buffer::wait_for_compositor_release(std::chrono::milliseconds timeout) {
++    std::unique_lock<std::mutex> lock(release_mutex);
++    return release_condition.wait_for(lock, timeout, [this]() {
++        return compositor_released;
++    });
++}
++
++int buffer::create_android_release_fence() {
++    std::lock_guard<std::mutex> lock(release_mutex);
++
++    if (isShm) {
++        ALOGE("Refusing Android release fence for SHM buffer=%p", this);
++        return -1;
++    }
++
++    if (!compositor_released || android_release_pending_value != 0) {
++        ALOGE("Refusing busy DMA-BUF attach: buffer=%p released=%d pending=%u",
++              this, compositor_released ? 1 : 0,
++              android_release_pending_value);
++        return -1;
++    }
++
++    if (android_release_timeline_fd < 0) {
++        android_release_timeline_fd = sw_sync_timeline_create();
++        if (android_release_timeline_fd < 0) {
++            ALOGE("Failed to create DMA-BUF release timeline: buffer=%p errno=%d",
++                  this, errno);
++            return -1;
++        }
++    }
++
++    const uint32_t fence_value = android_release_timeline_value + 1;
++    const int fence_fd = sw_sync_fence_create(
++        android_release_timeline_fd,
++        "waydroid_wl_buffer_release",
++        fence_value);
++
++    if (fence_fd < 0) {
++        ALOGE("Failed to create DMA-BUF release fence: buffer=%p value=%u errno=%d",
++              this, fence_value, errno);
++        return -1;
++    }
++
++    android_release_pending_value = fence_value;
++    compositor_released = false;
++
++    return fence_fd;
++}
++
++void buffer::mark_attached() {
++    std::lock_guard<std::mutex> lock(release_mutex);
++    compositor_released = false;
++}
++
++void buffer::mark_released() {
++    uint32_t signalled_value = 0;
++    uint32_t signal_increment = 0;
++    int signal_rc = 0;
++
++    {
++        std::lock_guard<std::mutex> lock(release_mutex);
++        if (!isShm && android_release_pending_value != 0) {
++            signalled_value = android_release_pending_value;
++
++            if (android_release_timeline_fd < 0
++                || signalled_value <= android_release_timeline_value) {
++                signal_rc = -EINVAL;
++            } else {
++                signal_increment =
++                    signalled_value - android_release_timeline_value;
++                signal_rc = sw_sync_timeline_inc(
++                    android_release_timeline_fd,
++                    signal_increment);
++
++                if (signal_rc == 0) {
++                    android_release_timeline_value = signalled_value;
++                    android_release_pending_value = 0;
++                }
++            }
++        }
++
++        compositor_released = true;
++    }
++
++    if (!isShm && signalled_value != 0 && signal_rc != 0) {
++        ALOGE("DMA-BUF release fence signal failed: buffer=%p "
++              "value=%u increment=%u rc=%d errno=%d",
++              this, signalled_value, signal_increment, signal_rc, errno);
++    }
++
++    release_condition.notify_all();
++}
++
+ buffer::~buffer() {
+     wl_buffer_destroy(wl_buffer);
++
++    if (android_release_timeline_fd >= 0) {
++        close(android_release_timeline_fd);
++    }
++
+     if (isShm)
+         munmap(shm_data, size);
+ }
+@@ -414,6 +512,10 @@ void surface_context::damage_surface(int32_t x, int32_t y, int32_t width, int32_
+     wl_surface_damage(surface, x, y, width, height);
+ }
+ 
++void surface_context::damage_buffer(int32_t x, int32_t y, int32_t width, int32_t height) {
++    wl_surface_damage_buffer(surface, x, y, width, height);
++}
++
+ void surface_context::set_buffer_transform(BufferTransform transform) {
+     wl_surface_set_buffer_transform(surface, static_cast<int32_t>(transform));
+ }
+diff --git a/hwcomposer/wayland-hwc.h b/hwcomposer/wayland-hwc.h
+index fe3ee5e..39228e8 100644
+--- a/hwcomposer/wayland-hwc.h
++++ b/hwcomposer/wayland-hwc.h
+@@ -57,7 +57,10 @@
+ #include <EGL/egl.h>
+ #include <EGL/eglext.h>
+ 
++#include <chrono>
++#include <condition_variable>
+ #include <functional>
++#include <mutex>
+ #include <unordered_map>
+ #include <unordered_set>
+ 
+@@ -131,6 +134,26 @@ struct buffer {
+     void *shm_data;
+     int size;
+ 
++    std::mutex release_mutex;
++    std::condition_variable release_condition;
++    bool compositor_released {true};
++
++    /*
++     * Each exported DMA-BUF gets its own sw_sync timeline.  SurfaceFlinger
++     * receives a release fence for every Wayland commit, and wl_buffer.release
++     * advances only this buffer's timeline.  A separate timeline per buffer
++     * avoids one buffer's out-of-order release signalling fences belonging to
++     * another buffer.
++     */
++    int android_release_timeline_fd {-1};
++    uint32_t android_release_timeline_value {0};
++    uint32_t android_release_pending_value {0};
++
++    bool wait_for_compositor_release(std::chrono::milliseconds timeout);
++    int create_android_release_fence();
++    void mark_attached();
++    void mark_released();
++
+     ~buffer();
+ };
+ 
+@@ -160,6 +183,7 @@ struct surface_context {
+ 
+     void attach_buffer(buffer& buf);
+     void damage_surface(int32_t x, int32_t y, int32_t width, int32_t height);
++    void damage_buffer(int32_t x, int32_t y, int32_t width, int32_t height);
+     void set_buffer_transform(BufferTransform transform);
+     void set_buffer_scale(double scale);
+     // Requires the transformed rectangle
+
+===== frameworks/av =====
+diff --git a/media/codec2/sfplugin/utils/Codec2BufferUtils.cpp b/media/codec2/sfplugin/utils/Codec2BufferUtils.cpp
+index 9bc8eb9c4c..3dffee9027 100644
+--- a/media/codec2/sfplugin/utils/Codec2BufferUtils.cpp
++++ b/media/codec2/sfplugin/utils/Codec2BufferUtils.cpp
+@@ -121,6 +121,26 @@ status_t ImageCopy(uint8_t *imgBase, const MediaImage2 *img, const C2GraphicView
+     if (view.crop().width != img->mWidth || view.crop().height != img->mHeight) {
+         return BAD_VALUE;
+     }
++    if (IsNV21(view) && IsI420(img)) {
++        // Fast path for interleaved VU graphic input to planar I420.
++        const uint8_t* src_y = view.data()[0];
++        const uint8_t* src_vu = view.data()[2];
++        int32_t src_stride_y = view.layout().planes[0].rowInc;
++        int32_t src_stride_vu = view.layout().planes[2].rowInc;
++        uint8_t* dst_y = imgBase + img->mPlane[0].mOffset;
++        uint8_t* dst_u = imgBase + img->mPlane[1].mOffset;
++        uint8_t* dst_v = imgBase + img->mPlane[2].mOffset;
++        int32_t dst_stride_y = img->mPlane[0].mRowInc;
++        int32_t dst_stride_u = img->mPlane[1].mRowInc;
++        int32_t dst_stride_v = img->mPlane[2].mRowInc;
++        if (!libyuv::NV21ToI420(
++                    src_y, src_stride_y, src_vu, src_stride_vu,
++                    dst_y, dst_stride_y, dst_u, dst_stride_u,
++                    dst_v, dst_stride_v, view.crop().width,
++                    view.crop().height)) {
++            return OK;
++        }
++    }
+     if ((IsNV12(view) && IsI420(img)) || (IsI420(view) && IsNV12(img))) {
+         // Take shortcuts to use libyuv functions between NV12 and I420 conversion.
+         const uint8_t* src_y = view.data()[0];
+@@ -225,6 +245,20 @@ bool IsNV12(const C2GraphicView &view) {
+             && layout.planes[layout.PLANE_V].offset == 1);
+ }
+ 
++bool IsNV21(const C2GraphicView &view) {
++    if (!IsYUV420(view)) {
++        return false;
++    }
++    const C2PlanarLayout &layout = view.layout();
++    return (layout.rootPlanes == 2
++            && layout.planes[layout.PLANE_U].colInc == 2
++            && layout.planes[layout.PLANE_U].rootIx == layout.PLANE_V
++            && layout.planes[layout.PLANE_U].offset == 1
++            && layout.planes[layout.PLANE_V].colInc == 2
++            && layout.planes[layout.PLANE_V].rootIx == layout.PLANE_V
++            && layout.planes[layout.PLANE_V].offset == 0);
++}
++
+ bool IsI420(const C2GraphicView &view) {
+     if (!IsYUV420(view)) {
+         return false;
+diff --git a/media/codec2/sfplugin/utils/Codec2BufferUtils.h b/media/codec2/sfplugin/utils/Codec2BufferUtils.h
+index afadf006c8..37f67de611 100644
+--- a/media/codec2/sfplugin/utils/Codec2BufferUtils.h
++++ b/media/codec2/sfplugin/utils/Codec2BufferUtils.h
+@@ -95,6 +95,11 @@ bool IsYUV420(const C2GraphicView &view);
+  */
+ bool IsNV12(const C2GraphicView &view);
+ 
++/**
++ * Returns true iff a view has a NV21 layout.
++ */
++bool IsNV21(const C2GraphicView &view);
++
+ /**
+  * Returns true iff a view has a I420 layout.
+  */
+
+===== hardware/interfaces =====
+
+===== system/netd =====

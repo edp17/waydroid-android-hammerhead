@@ -1,0 +1,47 @@
+waydroid-android-hammerhead 0.1.0 provenance
+
+Final open Android payload collection
+-------------------------------------
+Collection archive SHA-256:
+  3a007f7aa357576f5e430ade8c5de0c2782225990438bff0e2065e68b5b9e0ec
+
+Key source states:
+  device/lge/hammerhead     7b2476c70c15151c9af4fc112c133f914cd7e90d
+  hardware/qcom/display     818ef15669802f4e2ccbbd5a8d806f6ef7a12a5e
+  hardware/waydroid         65c9622d218d318f2c5a08f9d69b18323e944426 (hwc-stable-v8)
+  frameworks/av             18186d8f9b4dcaff242ae9ea9b74e6827f14a1cc
+  hardware/interfaces       a3183db29b7a57de9da42ec82b7a67ce49c0c68d
+  system/netd               c013516ff3b78598cbab7e1d0b86583732273b8f
+
+Some final source changes were uncommitted in the Android checkout when the
+payload was frozen.  repository-state.txt and source-diffs.patch capture the
+exact source delta used for the verified binaries.
+
+Runtime-validated clean QOMX:
+  libqomx_core.so
+  b7eb4e5b9e3142764f8a24db944ba1f5e6957d4539f757d6db7e538127b379da
+  Rear and front JPEG capture were both verified after this clean binary was
+  installed, and both saved images opened in Gallery.
+
+System libEGL compatibility patch
+---------------------------------
+The package does not distribute a modified system/lib/libEGL.so.  The runtime
+preparer derives it from the installed Waydroid system.img and requires the
+exact stock input SHA-256:
+  2d40e33fd60cde37118a9e04e1fd9358f28205bd8efa39e7a9be5a1acec6f00e
+
+It applies:
+  file offset 0x0000ccc0: d8f81870 -> 00f048b8
+  file offset 0x00011f9a: d0f8cc21 -> d0f8c821
+
+and requires the final SHA-256:
+  d9ccd264653d2b1b0be206db9b56ed71f4e60cf6a362392b8a6122bdec824645
+
+Proprietary graphics input
+--------------------------
+Not distributed by this repository/RPM.  The preparer requires the user's
+locally supplied Hammerhead LineageOS 18.1 graphics archive with SHA-256:
+  12b0ec5a17da018f80ab9ca6341950970e6683b56f28432d909f46d5e3aec4cd
+
+The extracted eglsubAndroid.so is patched locally and must end at:
+  500b92361e79a47b634a5f46bb54fcb710b19fbef4f63731baa55e6f25df4900

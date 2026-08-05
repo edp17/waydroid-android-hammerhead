@@ -1,0 +1,38 @@
+
+===== device/lge/hammerhead =====
+lineage-18.1
+7b2476c70c15151c9af4fc112c133f914cd7e90d
+## lineage-18.1...origin/lineage-18.1 [ahead 1]
+ M BoardConfig.mk
+ M camera/mm-image-codec/qomx_core/qomx_core.c
+?? camera/mm-image-codec/qomx_core/qomx_core.c.before-stage3zr-v2
+?? camera/mm-image-codec/qomx_core/qomx_core.c.before-stage3zr-v3
+
+===== hardware/qcom/display =====
+818ef15669802f4e2ccbbd5a8d806f6ef7a12a5e
+## HEAD (no branch)
+ M msm8974/libgralloc/mapper.cpp
+
+===== hardware/waydroid =====
+hwc-stable-v8
+65c9622d218d318f2c5a08f9d69b18323e944426
+## hwc-stable-v8...edp17/hwc-stable-v8
+ M hwcomposer/gralloc_handler.cpp
+ M hwcomposer/hwcomposer.cpp
+ M hwcomposer/wayland-hwc.cpp
+ M hwcomposer/wayland-hwc.h
+
+===== frameworks/av =====
+18186d8f9b4dcaff242ae9ea9b74e6827f14a1cc
+## HEAD (no branch)
+ M media/codec2/sfplugin/utils/Codec2BufferUtils.cpp
+ M media/codec2/sfplugin/utils/Codec2BufferUtils.h
+
+===== hardware/interfaces =====
+lineage-18.1-hammerhead-legacy-gnss
+a3183db29b7a57de9da42ec82b7a67ce49c0c68d
+## lineage-18.1-hammerhead-legacy-gnss...edp17/lineage-18.1-hammerhead-legacy-gnss
+
+===== system/netd =====
+c013516ff3b78598cbab7e1d0b86583732273b8f
+## HEAD (no branch)

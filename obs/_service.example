@@ -1,0 +1,10 @@
+<services>
+  <service name="tar_git">
+    <param name="url">https://github.com/edp17/waydroid-android-hammerhead.git</param>
+    <param name="branch">main</param>
+    <param name="revision">REPLACE_WITH_EXACT_COMMIT</param>
+    <param name="token"></param>
+    <param name="debian"></param>
+    <param name="dumb"></param>
+  </service>
+</services>
