@@ -1,0 +1,734 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""First-time Hammerhead Waydroid Android 11 image bootstrap.
+
+This helper is intentionally explicit. It downloads the exact validated
+LineageOS 18.1 / Android 11 Waydroid images from Waydroid's official archive,
+verifies both ZIPs and extracted images, initializes Waydroid through its
+preinstalled-image path, reapplies the Hammerhead host configuration, prepares
+the Android compatibility runtime, and leaves Waydroid stopped.
+
+It never resizes or writes system.img/vendor.img after extraction.
+"""
+
+import argparse
+import configparser
+import hashlib
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import zipfile
+from pathlib import Path
+
+PACKAGE = "waydroid-android-hammerhead"
+SETUP_NAME = "waydroid-hammerhead-setup"
+
+IMAGE_STORE = Path("/home/waydroid/images-lineage18.1-20250510")
+PREINSTALLED = Path("/etc/waydroid-extra/images")
+DOWNLOAD_DIR = Path("/home/waydroid/.hammerhead-image-downloads")
+
+SYSTEM_NAME = "lineage-18.1-20250510-VANILLA-waydroid_arm-system.zip"
+VENDOR_NAME = "lineage-18.1-20250510-MAINLINE-waydroid_arm-vendor.zip"
+
+SYSTEM_URL = (
+    "https://sourceforge.net/projects/waydroid/files/images/system/"
+    "lineage/waydroid_arm/%s/download" % SYSTEM_NAME
+)
+VENDOR_URL = (
+    "https://sourceforge.net/projects/waydroid/files/images/vendor/"
+    "waydroid_arm/%s/download" % VENDOR_NAME
+)
+
+SYSTEM_ZIP_SHA = "33398fd5056c8e1391a88728e6bf0848cacbcb0bc66c7a8fe6634e7665d6025d"
+VENDOR_ZIP_SHA = "9a40a4e28d2f22ca852709b1dd10e511323ff3b559524393af3c56d9b5aff7cc"
+
+SYSTEM_ZIP_SIZE = 589886490
+VENDOR_ZIP_SIZE = 65226742
+
+SYSTEM_IMAGE_SHA = "bc032c68d99078088244ede3fd1316fb600ff09cd36559a4f43964fbdd4d78ff"
+VENDOR_IMAGE_SHA = "5f71b63344d22a1189a8de969137dd07b42edc5ac253545c7596fd0af1c04ec1"
+
+SYSTEM_IMAGE_SIZE = 1210585088
+VENDOR_IMAGE_SIZE = 162459648
+
+SYSTEM_DATETIME = "1746887715"
+VENDOR_DATETIME = "1746876991"
+
+SYSTEM_CHANNEL = "https://ota.waydro.id/system"
+VENDOR_CHANNEL = "https://ota.waydro.id/vendor"
+SYSTEM_OTA = "https://ota.waydro.id/system/lineage/waydroid_arm/VANILLA.json"
+VENDOR_OTA = "https://ota.waydro.id/vendor/waydroid_arm/MAINLINE.json"
+
+WAYDROID_CFG = Path("/var/lib/waydroid/waydroid.cfg")
+CONFIG_NODES = Path("/var/lib/waydroid/lxc/waydroid/config_nodes")
+BASE_PROP = Path("/var/lib/waydroid/waydroid_base.prop")
+LXC_CONFIG = Path("/var/lib/waydroid/lxc/waydroid/config")
+
+CONFIG_HELPER = Path("/usr/libexec/waydroid-config-hammerhead/configure")
+PREPARE_HELPER = Path("/usr/libexec/waydroid-android-hammerhead/prepare")
+
+GRAPHICS_NAME = "hammerhead-lineage18.1-graphics-stage.tar.gz"
+GRAPHICS_SHA = "12b0ec5a17da018f80ab9ca6341950970e6683b56f28432d909f46d5e3aec4cd"
+GRAPHICS_CANDIDATES = [
+    Path("/etc/waydroid-extra/hammerhead/proprietary") / GRAPHICS_NAME,
+    Path("/home/defaultuser/Downloads") / GRAPHICS_NAME,
+    Path("/home/defaultuser") / GRAPHICS_NAME,
+]
+
+REQUIRED_KERNEL_CONFIG = [
+    "CONFIG_VETH=y",
+    "CONFIG_NETFILTER_XT_TARGET_CHECKSUM=y",
+    "CONFIG_NET_CLS_CGROUP=y",
+    "CONFIG_ANDROID_BINDER_IPC=y",
+    "CONFIG_ASHMEM=y",
+    "CONFIG_SYNC=y",
+    "CONFIG_SW_SYNC=y",
+    "CONFIG_SW_SYNC_USER=y",
+]
+
+BINDER_DEVICES = {
+    "binder": "/dev/puddlejumper",
+    "vndbinder": "/dev/vndpuddlejumper",
+    "hwbinder": "/dev/hwpuddlejumper",
+}
+
+
+class SetupError(Exception):
+    pass
+
+
+def say(msg=""):
+    print(msg)
+    sys.stdout.flush()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(str(path), "rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def run(args, check=True, capture=False):
+    say("+ " + " ".join(str(x) for x in args))
+    if capture:
+        proc = subprocess.run(
+            [str(x) for x in args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            check=False,
+        )
+        if check and proc.returncode != 0:
+            raise SetupError(
+                "command failed rc=%d: %s\n%s"
+                % (proc.returncode, " ".join(str(x) for x in args), proc.stdout)
+            )
+        return proc.returncode, proc.stdout
+    proc = subprocess.run([str(x) for x in args], check=False)
+    if check and proc.returncode != 0:
+        raise SetupError(
+            "command failed rc=%d: %s"
+            % (proc.returncode, " ".join(str(x) for x in args))
+        )
+    return proc.returncode, ""
+
+
+def container_state():
+    try:
+        rc, out = run(
+            ["lxc-info", "-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-sH"],
+            check=False,
+            capture=True,
+        )
+        if rc == 0 and out.strip():
+            return out.strip()
+    except Exception:
+        pass
+    return "STOPPED"
+
+
+def ensure_stopped():
+    state = container_state()
+    say("container_state=%s" % state)
+    if state in ("RUNNING", "FROZEN"):
+        raise SetupError("Waydroid must be stopped before setup")
+    run(["systemctl", "stop", "waydroid-container.service"], check=False)
+    state = container_state()
+    if state in ("RUNNING", "FROZEN"):
+        raise SetupError("Waydroid remained %s after stop request" % state)
+
+
+def check_kernel():
+    say("=== kernel compatibility preflight ===")
+    if not Path("/proc/config.gz").is_file():
+        raise SetupError("/proc/config.gz is missing; cannot verify Hammerhead kernel")
+    rc, text = run(["zcat", "/proc/config.gz"], capture=True)
+    values = set(line.strip() for line in text.splitlines())
+    missing = [item for item in REQUIRED_KERNEL_CONFIG if item not in values]
+    for item in REQUIRED_KERNEL_CONFIG:
+        say("%s %s" % ("OK " if item in values else "BAD", item))
+    if missing:
+        raise SetupError("kernel is missing required options: %s" % ", ".join(missing))
+
+    for label, path in BINDER_DEVICES.items():
+        p = Path(path)
+        if not p.exists():
+            raise SetupError("missing %s Binder device: %s" % (label, path))
+        say("OK %s=%s" % (label, path))
+
+    if not Path("/dev/sw_sync").exists():
+        raise SetupError("missing /dev/sw_sync despite CONFIG_SW_SYNC_USER=y")
+    say("OK /dev/sw_sync")
+
+
+def locate_graphics():
+    for path in GRAPHICS_CANDIDATES:
+        if not path.is_file():
+            continue
+        digest = sha256_file(path)
+        say("graphics_candidate=%s sha256=%s" % (path, digest))
+        if digest == GRAPHICS_SHA:
+            return path
+        raise SetupError("graphics archive has unexpected SHA-256: %s" % path)
+    raise SetupError(
+        "missing %s; place the exact archive (SHA-256 %s) in %s"
+        % (GRAPHICS_NAME, GRAPHICS_SHA, GRAPHICS_CANDIDATES[0].parent)
+    )
+
+
+def free_bytes(path):
+    path.mkdir(parents=True, exist_ok=True)
+    return shutil.disk_usage(str(path)).free
+
+
+def ensure_free_space():
+    # Peak usage occurs while system.zip and extracted system.img coexist.
+    # Add 256 MiB margin for metadata/runtime work.
+    required = SYSTEM_ZIP_SIZE + SYSTEM_IMAGE_SIZE + (256 * 1024 * 1024)
+    free = free_bytes(Path("/home/waydroid"))
+    say("home_free_bytes=%d" % free)
+    say("minimum_setup_free_bytes=%d" % required)
+    if free < required:
+        raise SetupError(
+            "not enough free space under /home for pinned images; need at least %.2f GiB free"
+            % (required / float(1024 ** 3))
+        )
+
+
+def download_with_curl(url, dst):
+    curl = shutil.which("curl")
+    if not curl:
+        return False
+    tmp = dst.with_name("." + dst.name + ".part")
+    if tmp.exists():
+        tmp.unlink()
+    rc, _ = run(
+        [
+            curl, "-L", "--fail", "--show-error",
+            "--retry", "3", "--retry-delay", "2",
+            "-o", str(tmp), url,
+        ],
+        check=False,
+    )
+    if rc != 0:
+        if tmp.exists():
+            tmp.unlink()
+        return False
+    os.replace(str(tmp), str(dst))
+    return True
+
+
+def download_with_urllib(url, dst):
+    tmp = dst.with_name("." + dst.name + ".part")
+    if tmp.exists():
+        tmp.unlink()
+
+    say("Downloading with Python urllib: %s" % url)
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "waydroid-android-hammerhead/0.2.0"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as response, open(str(tmp), "wb") as out:
+        total = response.headers.get("Content-Length")
+        total = int(total) if total and total.isdigit() else None
+        done = 0
+        last_report = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if done - last_report >= 32 * 1024 * 1024:
+                if total:
+                    say("downloaded=%d/%d bytes (%.1f%%)" % (done, total, done * 100.0 / total))
+                else:
+                    say("downloaded=%d bytes" % done)
+                last_report = done
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(str(tmp), str(dst))
+
+
+def ensure_zip(name, url, expected_sha, expected_size):
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    path = DOWNLOAD_DIR / name
+    if path.is_file():
+        digest = sha256_file(path)
+        size = path.stat().st_size
+        if digest == expected_sha and size == expected_size:
+            say("reusing verified download: %s" % path)
+            return path
+        say("discarding invalid cached download: %s" % path)
+        path.unlink()
+
+    say("=== download %s ===" % name)
+    if not download_with_curl(url, path):
+        download_with_urllib(url, path)
+
+    size = path.stat().st_size
+    digest = sha256_file(path)
+    say("zip_size=%d" % size)
+    say("zip_sha256=%s" % digest)
+    if size != expected_size:
+        raise SetupError("downloaded ZIP size mismatch for %s" % name)
+    if digest != expected_sha:
+        raise SetupError("downloaded ZIP SHA-256 mismatch for %s" % name)
+    return path
+
+
+def extract_single_image(zip_path, image_basename, final_path, expected_sha, expected_size):
+    if final_path.is_file():
+        size = final_path.stat().st_size
+        digest = sha256_file(final_path)
+        if size == expected_size and digest == expected_sha:
+            say("reusing verified image: %s" % final_path)
+            return
+        raise SetupError(
+            "existing image differs from pinned Hammerhead image: %s; remove it manually if replacement is intended"
+            % final_path
+        )
+
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = final_path.with_name("." + final_path.name + ".new")
+    if tmp.exists():
+        tmp.unlink()
+
+    with zipfile.ZipFile(str(zip_path), "r") as zf:
+        matches = [
+            info for info in zf.infolist()
+            if not info.is_dir() and Path(info.filename).name == image_basename
+        ]
+        if len(matches) != 1:
+            raise SetupError(
+                "%s expected exactly one %s, found %d"
+                % (zip_path.name, image_basename, len(matches))
+            )
+        info = matches[0]
+        if info.file_size != expected_size:
+            raise SetupError(
+                "%s uncompressed size mismatch in ZIP: %d"
+                % (image_basename, info.file_size)
+            )
+
+        say("extracting %s -> %s" % (info.filename, final_path))
+        h = hashlib.sha256()
+        written = 0
+        with zf.open(info, "r") as src, open(str(tmp), "wb") as out:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                h.update(chunk)
+                written += len(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+
+    digest = h.hexdigest()
+    if written != expected_size:
+        tmp.unlink()
+        raise SetupError("%s extracted size mismatch" % image_basename)
+    if digest != expected_sha:
+        tmp.unlink()
+        raise SetupError("%s extracted SHA-256 mismatch: %s" % (image_basename, digest))
+    os.chmod(str(tmp), 0o644)
+    os.replace(str(tmp), str(final_path))
+    say("image_sha256=%s" % digest)
+
+
+def ensure_images():
+    say("=== pinned Android 11 images ===")
+    IMAGE_STORE.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(IMAGE_STORE), 0o755)
+
+    system = IMAGE_STORE / "system.img"
+    vendor = IMAGE_STORE / "vendor.img"
+
+    if not system.is_file():
+        z = ensure_zip(SYSTEM_NAME, SYSTEM_URL, SYSTEM_ZIP_SHA, SYSTEM_ZIP_SIZE)
+        extract_single_image(z, "system.img", system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE)
+        z.unlink()
+        say("removed verified system ZIP after extraction")
+    else:
+        extract_single_image(
+            DOWNLOAD_DIR / SYSTEM_NAME, "system.img", system,
+            SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE
+        )
+
+    if not vendor.is_file():
+        z = ensure_zip(VENDOR_NAME, VENDOR_URL, VENDOR_ZIP_SHA, VENDOR_ZIP_SIZE)
+        extract_single_image(z, "vendor.img", vendor, VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE)
+        z.unlink()
+        say("removed verified vendor ZIP after extraction")
+    else:
+        extract_single_image(
+            DOWNLOAD_DIR / VENDOR_NAME, "vendor.img", vendor,
+            VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE
+        )
+
+    verify_image(system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE, "system")
+    verify_image(vendor, VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE, "vendor")
+    return system, vendor
+
+
+def verify_image(path, expected_sha, expected_size, label):
+    if not path.is_file():
+        raise SetupError("missing %s image: %s" % (label, path))
+    size = path.stat().st_size
+    digest = sha256_file(path)
+    say("%s_image=%s" % (label, path))
+    say("%s_size=%d" % (label, size))
+    say("%s_sha256=%s" % (label, digest))
+    if size != expected_size or digest != expected_sha:
+        raise SetupError("%s image identity mismatch" % label)
+
+
+def ensure_preinstalled_links(system, vendor):
+    say("=== Waydroid preinstalled-image path ===")
+    PREINSTALLED.mkdir(parents=True, exist_ok=True)
+    os.chmod(str(PREINSTALLED), 0o755)
+
+    for link, target in (
+        (PREINSTALLED / "system.img", system),
+        (PREINSTALLED / "vendor.img", vendor),
+    ):
+        if link.is_symlink():
+            resolved = Path(os.path.realpath(str(link)))
+            if resolved == target:
+                say("%s -> %s" % (link, target))
+                continue
+            raise SetupError("existing image symlink points elsewhere: %s -> %s" % (link, resolved))
+        if link.exists():
+            # Accept only exact pinned regular files, but do not replace them silently.
+            expected_sha = SYSTEM_IMAGE_SHA if link.name == "system.img" else VENDOR_IMAGE_SHA
+            expected_size = SYSTEM_IMAGE_SIZE if link.name == "system.img" else VENDOR_IMAGE_SIZE
+            verify_image(link, expected_sha, expected_size, link.name)
+            raise SetupError(
+                "%s is a regular file; move it aside so setup can create the intended /home-backed symlink"
+                % link
+            )
+        os.symlink(str(target), str(link))
+        say("%s -> %s" % (link, target))
+
+
+def image_has_loop(path):
+    real = os.path.realpath(str(path))
+    rc, out = run(["losetup", "-j", real], check=False, capture=True)
+    return rc == 0 and bool(out.strip())
+
+
+def reject_loops(system, vendor):
+    if image_has_loop(system) or image_has_loop(vendor):
+        raise SetupError(
+            "Waydroid image loop attachment already exists; reboot without starting Waydroid and retry"
+        )
+
+
+def initialized():
+    return WAYDROID_CFG.is_file()
+
+
+def run_waydroid_init(force):
+    say("=== initialize Waydroid 1.4.3 with preinstalled Android 11 images ===")
+    if initialized() and not force:
+        raise SetupError(
+            "Waydroid is already initialized; rerun with --force only if reinitialization is intentional"
+        )
+
+    cmd = [
+        "waydroid", "init", "-f",
+        "-i", str(PREINSTALLED),
+        "-c", SYSTEM_CHANNEL,
+        "-v", VENDOR_CHANNEL,
+        "-r", "lineage",
+        "-s", "VANILLA",
+    ]
+    rc, out = run(cmd, check=False, capture=True)
+    sys.stdout.write(out)
+    sys.stdout.flush()
+    if rc != 0:
+        raise SetupError("waydroid init failed with rc=%d" % rc)
+
+    for path in (WAYDROID_CFG, CONFIG_NODES, BASE_PROP, LXC_CONFIG):
+        if not path.is_file():
+            raise SetupError("waydroid init did not create expected file: %s" % path)
+
+
+def call_config_helper():
+    if not CONFIG_HELPER.is_file():
+        raise SetupError("missing waydroid-config-hammerhead helper: %s" % CONFIG_HELPER)
+    run([str(CONFIG_HELPER)])
+
+
+def atomic_write(path, text):
+    st = path.stat() if path.exists() else None
+    fd, name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        if st:
+            os.chmod(str(tmp), stat.S_IMODE(st.st_mode))
+            try:
+                os.chown(str(tmp), st.st_uid, st.st_gid)
+            except PermissionError:
+                pass
+        else:
+            os.chmod(str(tmp), 0o644)
+        os.replace(str(tmp), str(path))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def pin_cfg_metadata_and_binders():
+    say("=== pin Android 11 metadata and Binder configuration ===")
+    cfg = configparser.ConfigParser(interpolation=None, strict=False)
+    cfg.optionxform = str
+    with WAYDROID_CFG.open() as handle:
+        cfg.read_file(handle)
+    if not cfg.has_section("waydroid"):
+        raise SetupError("waydroid.cfg missing [waydroid]")
+
+    wanted = {
+        "arch": "arm",
+        "vendor_type": "MAINLINE",
+        "images_path": str(PREINSTALLED),
+        "system_ota": SYSTEM_OTA,
+        "vendor_ota": VENDOR_OTA,
+        "system_datetime": SYSTEM_DATETIME,
+        "vendor_datetime": VENDOR_DATETIME,
+        "binder": "puddlejumper",
+        "vndbinder": "vndpuddlejumper",
+        "hwbinder": "hwpuddlejumper",
+        "binder_protocol": "aidl3",
+        "service_manager_protocol": "aidl3",
+        "mount_overlays": "False",
+    }
+    for key, value in wanted.items():
+        cfg.set("waydroid", key, value)
+
+    from io import StringIO
+    buf = StringIO()
+    cfg.write(buf, space_around_delimiters=True)
+    atomic_write(WAYDROID_CFG, buf.getvalue())
+
+    # config_nodes is generated by Waydroid init before our device profile is
+    # applied. Replace only the three Binder mount source paths.
+    lines = CONFIG_NODES.read_text().splitlines()
+    targets = {
+        "dev/binder": "/dev/puddlejumper",
+        "dev/vndbinder": "/dev/vndpuddlejumper",
+        "dev/hwbinder": "/dev/hwpuddlejumper",
+    }
+    counts = dict((key, 0) for key in targets)
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        replaced = False
+        if stripped.startswith("lxc.mount.entry = "):
+            parts = stripped.split()
+            # lxc.mount.entry = SRC TARGET none ...
+            if len(parts) >= 5:
+                target = parts[3]
+                if target in targets:
+                    parts[2] = targets[target]
+                    line = " ".join(parts)
+                    counts[target] += 1
+                    replaced = True
+        out.append(line)
+
+    bad = [key for key, count in counts.items() if count != 1]
+    if bad:
+        raise SetupError(
+            "expected exactly one generated Binder mount for each target; counts=%s"
+            % counts
+        )
+    atomic_write(CONFIG_NODES, "\n".join(out) + "\n")
+
+    say("system_datetime=%s" % SYSTEM_DATETIME)
+    say("vendor_datetime=%s" % VENDOR_DATETIME)
+    say("binder=puddlejumper")
+    say("vndbinder=vndpuddlejumper")
+    say("hwbinder=hwpuddlejumper")
+    say("binder_protocol=aidl3")
+    say("service_manager_protocol=aidl3")
+
+
+def verify_cfg_and_nodes():
+    cfg = configparser.ConfigParser(interpolation=None, strict=False)
+    cfg.optionxform = str
+    with WAYDROID_CFG.open() as handle:
+        cfg.read_file(handle)
+    wd = cfg["waydroid"]
+    checks = {
+        "images_path": str(PREINSTALLED),
+        "system_datetime": SYSTEM_DATETIME,
+        "vendor_datetime": VENDOR_DATETIME,
+        "binder": "puddlejumper",
+        "vndbinder": "vndpuddlejumper",
+        "hwbinder": "hwpuddlejumper",
+        "binder_protocol": "aidl3",
+        "service_manager_protocol": "aidl3",
+        "mount_overlays": "False",
+    }
+    for key, expected in checks.items():
+        actual = wd.get(key)
+        if actual != expected:
+            raise SetupError("waydroid.cfg %s=%r, expected %r" % (key, actual, expected))
+
+    text = CONFIG_NODES.read_text()
+    wanted_lines = [
+        "lxc.mount.entry = /dev/puddlejumper dev/binder none bind,create=file,optional 0 0",
+        "lxc.mount.entry = /dev/vndpuddlejumper dev/vndbinder none bind,create=file,optional 0 0",
+        "lxc.mount.entry = /dev/hwpuddlejumper dev/hwbinder none bind,create=file,optional 0 0",
+    ]
+    for line in wanted_lines:
+        if text.count(line) != 1:
+            raise SetupError("config_nodes missing exact Binder mount: %s" % line)
+
+
+def prepare_runtime():
+    say("=== prepare Hammerhead Android runtime overlays ===")
+    if not PREPARE_HELPER.is_file():
+        raise SetupError("missing runtime preparer: %s" % PREPARE_HELPER)
+    run([str(PREPARE_HELPER), "--ensure"])
+    # Re-run host configurator now that config_android exists so it gets
+    # included in the generated main LXC config.
+    call_config_helper()
+
+
+def verify_images_unchanged(system, vendor):
+    say("=== verify stock images remained byte-identical ===")
+    verify_image(system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE, "system_after")
+    verify_image(vendor, VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE, "vendor_after")
+
+
+def status():
+    say("setup=%s" % SETUP_NAME)
+    say("container_state=%s" % container_state())
+    for label, path, digest, size in (
+        ("system", IMAGE_STORE / "system.img", SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE),
+        ("vendor", IMAGE_STORE / "vendor.img", VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE),
+    ):
+        if path.is_file():
+            say("%s=%s size=%d sha256=%s" % (
+                label, path, path.stat().st_size, sha256_file(path)
+            ))
+        else:
+            say("%s=missing" % label)
+    say("waydroid_cfg=%s" % ("present" if WAYDROID_CFG.is_file() else "missing"))
+    say("config_nodes=%s" % ("present" if CONFIG_NODES.is_file() else "missing"))
+    say("runtime=%s" % ("present" if Path("/home/waydroid/hammerhead-runtime").is_dir() else "missing"))
+    say("config_android=%s" % (
+        "present" if Path("/etc/waydroid-extra/hammerhead/config_android").is_file() else "missing"
+    ))
+    for p in GRAPHICS_CANDIDATES:
+        if p.is_file():
+            say("graphics=%s sha256=%s" % (p, sha256_file(p)))
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow forced reinitialization of an existing Waydroid configuration",
+    )
+    parser.add_argument("--status", action="store_true")
+    args = parser.parse_args()
+
+    if args.status:
+        return status()
+
+    if os.geteuid() != 0:
+        raise SetupError("run %s as root" % SETUP_NAME)
+
+    say("=== Hammerhead Waydroid clean setup ===")
+    say("Pinned system: %s" % SYSTEM_NAME)
+    say("Pinned vendor: %s" % VENDOR_NAME)
+    say("No Android image will be resized or modified after extraction.")
+
+    ensure_stopped()
+    check_kernel()
+    locate_graphics()
+    ensure_free_space()
+
+    system, vendor = ensure_images()
+    ensure_preinstalled_links(system, vendor)
+    reject_loops(system, vendor)
+
+    before_system = sha256_file(system)
+    before_vendor = sha256_file(vendor)
+
+    run_waydroid_init(args.force)
+
+    # Apply the package-owned host profile, then pin fields which preinstalled
+    # image initialization does not update itself.
+    call_config_helper()
+    pin_cfg_metadata_and_binders()
+    verify_cfg_and_nodes()
+
+    prepare_runtime()
+    verify_cfg_and_nodes()
+
+    if sha256_file(system) != before_system or sha256_file(vendor) != before_vendor:
+        raise SetupError("Waydroid images changed during initialization/preparation")
+    verify_images_unchanged(system, vendor)
+
+    ensure_stopped()
+
+    say()
+    say("=== Hammerhead Waydroid setup complete ===")
+    say("system.img=%s" % system)
+    say("vendor.img=%s" % vendor)
+    say("images are stock, checksum-pinned, and unmodified")
+    say("Waydroid is intentionally left stopped.")
+    say("Start the first UI test manually as defaultuser with:")
+    say("  waydroid show-full-ui")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except SetupError as exc:
+        print("%s: ERROR: %s" % (SETUP_NAME, exc), file=sys.stderr)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        print("%s: interrupted" % SETUP_NAME, file=sys.stderr)
+        sys.exit(130)

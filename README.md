@@ -15,6 +15,82 @@ preparer builds `/home/waydroid/hammerhead-runtime` and writes
 `/etc/waydroid-extra/hammerhead/config_android`; `waydroid-config-hammerhead`
 then includes that LXC fragment.
 
+
+## Clean installation / pinned Android 11 images
+
+Version 0.2.0 adds the explicit first-time bootstrap command:
+
+```sh
+waydroid-hammerhead-setup
+```
+
+Run it as `root` only after the exact proprietary Hammerhead graphics archive
+has been placed at:
+
+```text
+/etc/waydroid-extra/hammerhead/proprietary/hammerhead-lineage18.1-graphics-stage.tar.gz
+```
+
+The setup helper pins the exact Waydroid images used by the Hammerhead port:
+
+```text
+lineage-18.1-20250510-VANILLA-waydroid_arm-system.zip
+SHA-256: 33398fd5056c8e1391a88728e6bf0848cacbcb0bc66c7a8fe6634e7665d6025d
+
+lineage-18.1-20250510-MAINLINE-waydroid_arm-vendor.zip
+SHA-256: 9a40a4e28d2f22ca852709b1dd10e511323ff3b559524393af3c56d9b5aff7cc
+```
+
+It verifies the extracted stock files as:
+
+```text
+system.img
+SHA-256: bc032c68d99078088244ede3fd1316fb600ff09cd36559a4f43964fbdd4d78ff
+
+vendor.img
+SHA-256: 5f71b63344d22a1189a8de969137dd07b42edc5ac253545c7596fd0af1c04ec1
+```
+
+The large images live under:
+
+```text
+/home/waydroid/images-lineage18.1-20250510/
+```
+
+and `/etc/waydroid-extra/images/system.img` and `vendor.img` are symlinks to
+those files. This keeps the large Android images off the Sailfish root
+filesystem while still using Waydroid 1.4.3's recognized preinstalled-image
+path.
+
+The helper then:
+
+1. verifies the required Hammerhead kernel configuration and Binder devices;
+2. stops Waydroid;
+3. downloads/verifies/extracts the exact pinned Android 11 images;
+4. runs `waydroid init -f` through `/etc/waydroid-extra/images`, preventing
+   Waydroid from replacing the pinned images with current OTA images;
+5. pins the proven Android 11 metadata:
+   `system_datetime=1746887715`, `vendor_datetime=1746876991`;
+6. enforces `puddlejumper`, `vndpuddlejumper`, `hwpuddlejumper` and
+   `aidl3/aidl3`;
+7. corrects only the three generated Binder mount sources in `config_nodes`;
+8. runs `waydroid-config-hammerhead` and the Android runtime preparer;
+9. re-verifies the complete `system.img` and `vendor.img` hashes; and
+10. leaves Waydroid stopped for the first controlled UI launch.
+
+No `system.img` or `vendor.img` resize is performed. The old development-time
+vendor expansion is obsolete because all Hammerhead additions are supplied as
+external read-only LXC bind mounts.
+
+`--status` is read-only:
+
+```sh
+waydroid-hammerhead-setup --status
+```
+
+`--force` permits deliberate reinitialization of an existing Waydroid
+configuration; it is not needed on a clean installation.
+
 ## Proprietary material is deliberately not distributed
 
 The GitHub/OBS source and RPM do not contain Qualcomm proprietary graphics,

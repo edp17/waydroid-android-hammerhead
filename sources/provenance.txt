@@ -1,4 +1,4 @@
-waydroid-android-hammerhead 0.1.0 provenance
+waydroid-android-hammerhead 0.2.0 provenance
 
 Final open Android payload collection
 -------------------------------------
@@ -45,3 +45,43 @@ locally supplied Hammerhead LineageOS 18.1 graphics archive with SHA-256:
 
 The extracted eglsubAndroid.so is patched locally and must end at:
   500b92361e79a47b634a5f46bb54fcb710b19fbef4f63731baa55e6f25df4900
+
+
+Pinned clean-install Android images
+-----------------------------------
+The RPM does not redistribute Waydroid system/vendor images.
+
+The first-time setup helper downloads the exact official Waydroid archive
+entries validated during Hammerhead development:
+
+System:
+  lineage-18.1-20250510-VANILLA-waydroid_arm-system.zip
+  size: 589886490
+  SHA-256: 33398fd5056c8e1391a88728e6bf0848cacbcb0bc66c7a8fe6634e7665d6025d
+  extracted system.img:
+  size: 1210585088
+  SHA-256: bc032c68d99078088244ede3fd1316fb600ff09cd36559a4f43964fbdd4d78ff
+  OTA datetime: 1746887715
+
+Vendor:
+  lineage-18.1-20250510-MAINLINE-waydroid_arm-vendor.zip
+  size: 65226742
+  SHA-256: 9a40a4e28d2f22ca852709b1dd10e511323ff3b559524393af3c56d9b5aff7cc
+  extracted vendor.img:
+  size: 162459648
+  SHA-256: 5f71b63344d22a1189a8de969137dd07b42edc5ac253545c7596fd0af1c04ec1
+  OTA datetime: 1746876991
+
+The setup helper stores these stock images under /home/waydroid and exposes
+them through /etc/waydroid-extra/images symlinks. It never resizes or writes
+either image after extraction. Whole-image hashes are checked again after
+Waydroid initialization and Hammerhead runtime preparation.
+
+Final Hammerhead kernel source
+------------------------------
+The final Waydroid-capable Hammerhead kernel source is published at:
+  https://github.com/edp17/android_kernel_lge_hammerhead
+  branch: hybris-12.1-edp17
+  commit: 17cfb4e852177507ced2831dbfb2e8c7a6842e39
+
+That commit includes CONFIG_SW_SYNC_USER=y in the tracked Hammerhead defconfig.
