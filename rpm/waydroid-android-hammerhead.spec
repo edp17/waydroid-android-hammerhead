@@ -13,7 +13,7 @@ BuildRequires:  systemd
 Requires:       waydroid >= 1.4.3
 Requires:       waydroid-config-hammerhead >= 0.2.0
 Requires:       droid-hal-hammerhead
-Requires:       lxc
+Requires:       lxc >= 5.0.3
 Requires:       python3-base
 
 %description
