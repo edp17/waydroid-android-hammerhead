@@ -1,16 +1,19 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: MIT
-"""Prepare Android-side Hammerhead compatibility files for Waydroid.
+"""Prepare the pinned Android 11 images for Hammerhead Waydroid.
 
-No Android image is modified.  Open payload files are supplied by this RPM.
-Proprietary Qualcomm files are derived from the locally installed Hammerhead
-adaptation and from a user-supplied, checksum-pinned LineageOS graphics archive.
-Generated files are bind-mounted by config_android.
+The final Hammerhead integration is installed directly into system.img and
+vendor.img while Waydroid is stopped. system.img keeps its original size;
+vendor.img is expanded by exactly 128 MiB. Proprietary Qualcomm files are
+never shipped by this RPM: they are derived locally from the installed
+Hammerhead adaptation and from the checksum-pinned graphics archive supplied
+by the device owner.
+
+No loop device or filesystem mount is used. ext4 files are read/written with
+debugfs and vendor.img is expanded with e2fsck/resize2fs.
 """
 
 import argparse
-import contextlib
-import errno
 import hashlib
 import json
 import os
@@ -21,55 +24,55 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 from pathlib import Path
 
 PACKAGE = "waydroid-android-hammerhead"
-SCHEMA = 1
+SCHEMA = 2
 
 DATA_DIR = Path("/usr/share/waydroid-android-hammerhead")
 OPEN_ARCHIVE = DATA_DIR / "open-payload.tar.gz"
 OPEN_ARCHIVE_SHA_FILE = DATA_DIR / "open-payload.sha256"
+SYSTEM_PAYLOAD_DIR = DATA_DIR / "system"
 
-RUNTIME_PARENT = Path("/home/waydroid")
-RUNTIME = RUNTIME_PARENT / "hammerhead-runtime"
-CONFIG_ANDROID = Path("/etc/waydroid-extra/hammerhead/config_android")
+SYSTEM_IMAGE_LINK = Path("/etc/waydroid-extra/images/system.img")
+VENDOR_IMAGE_LINK = Path("/etc/waydroid-extra/images/vendor.img")
 PROPRIETARY_DIR = Path("/etc/waydroid-extra/hammerhead/proprietary")
+LEGACY_RUNTIME = Path("/home/waydroid/hammerhead-runtime")
+LEGACY_CONFIG_ANDROID = Path("/etc/waydroid-extra/hammerhead/config_android")
+STATE_FILE = Path("/home/waydroid/.hammerhead-image-state.json")
+
+STOCK_SYSTEM_SIZE = 1210585088
+STOCK_VENDOR_SIZE = 162459648
+FINAL_VENDOR_SIZE = 296677376  # stock + 128 MiB
+STOCK_SYSTEM_SHA = "bc032c68d99078088244ede3fd1316fb600ff09cd36559a4f43964fbdd4d78ff"
+STOCK_VENDOR_SHA = "5f71b63344d22a1189a8de969137dd07b42edc5ac253545c7596fd0af1c04ec1"
+
 GRAPHICS_NAME = "hammerhead-lineage18.1-graphics-stage.tar.gz"
 GRAPHICS_SHA = "12b0ec5a17da018f80ab9ca6341950970e6683b56f28432d909f46d5e3aec4cd"
 
-SYSTEM_IMAGE = Path("/etc/waydroid-extra/images/system.img")
-VENDOR_IMAGE = Path("/etc/waydroid-extra/images/vendor.img")
-
 STOCK_LIBEGL_SHA = "2d40e33fd60cde37118a9e04e1fd9358f28205bd8efa39e7a9be5a1acec6f00e"
-STAGE1_LIBEGL_SHA = "5d8fb163c3ee1b17312e3c4dbb566748fa2acaff4ef4fc75151b6042530ce2cb"
 FINAL_LIBEGL_SHA = "d9ccd264653d2b1b0be206db9b56ed71f4e60cf6a362392b8a6122bdec824645"
-
+STOCK_SURFACEFLINGER_SHA = "4a7bb90839543cc6d1b075e6c57bfce11d9dd13ea835cca27ee0132e999917bf"
+FINAL_SURFACEFLINGER_SHA = "7e19b3f175267e3b97065f8da7ad36379749fbe48f612f8d40d74ec728fd3e8f"
+FINAL_NETD_SHA = "5fe93d766b98496e454f5d923c4662af795825b02f1d627ee57d92d8ebaa0ad4"
+FINAL_DIRECT_CONNECT_SHA = "36818e6b0f7bd3287f7d67337875a428b088ef4e8c52881f4021db7ed9e783e7"
 STOCK_VENDOR_BUILD_PROP_SHA = "95faafcd231ff1b3f6720f20e0a9cf29b9147d516a6b773c09d85b5fd54d8677"
 FINAL_VENDOR_BUILD_PROP_SHA = "462bb4320ce30c280f7c68b19b8034748ca65e7709a7f7d8401f0d480028121c"
 VENDOR_IMPORT_BLOCK = ("\n# Hammerhead: load host-generated Waydroid runtime properties\n"
                        "import /vendor/waydroid.prop\n")
 
-STOCK_APEX_UTIL_SHA = "cfa508060fb0537c1baee3eb1b6eba0570127f86b864158a611a15d1203e35bb"
-STOCK_APEX_UTIL_SIZE = 203804
-FINAL_APEX_UTIL_SHA = "7c142da7069f19e4b528d54ea0bd794923011c2e9a64a9adfd87db44af8e7d99"
-FINAL_APEX_UTIL_SIZE = 204300
-
-OPEN_REQUIRED = {
+OPEN_REQUIRED_VENDOR = {
     "vendor/lib/hw/hwcomposer.waydroid.so": "caba8145a933eed838fda0fecbfad01bf0c1349d7c47f33bf87ca7fc0d07ee12",
     "vendor/lib/hw/camera.hammerhead.so": "af2f30771cc857c4401a1835d95a95164267018aca6f18224a9a766c9d7ac8af",
     "vendor/lib/hw/gralloc.msm8974.so": "c845d01983fd2340c0a82108f4d6bdb65f928c2c452ab0f3f10e5395fff28757",
     "vendor/lib/libmmcamera_interface.so": "e3e4bfbcc08f1db912fcc33473b70b03d89e7ebf2714767d453841f7c5680897",
     "vendor/lib/libmmjpeg_interface.so": "7164734e8aa246ed9c0ec6c58804268f3c0a911f06221e0b0b19c10725cd3a58",
     "vendor/lib/libqomx_core.so": "b7eb4e5b9e3142764f8a24db944ba1f5e6957d4539f757d6db7e538127b379da",
-    "system/lib/libsfplugin_ccodec_utils.so": FINAL_APEX_UTIL_SHA,
     "vendor/bin/hw/android.hardware.gnss@1.0-service": "7afd10cb7fd574be22ff198f9120905a0de8a45704c425addb2b12485c77b2a6",
     "vendor/lib/hw/android.hardware.gnss@1.0-impl.so": "efb8ec1ac2991e51e166801ee16d22c63fc6679317c4e8d2d215a9ea1a00c092",
     "vendor/etc/init/android.hardware.gnss@1.0-service.rc": "5c8e9abba335ba4c99d90a4a24be5cdf02a3f6d1045736365676d13e510ace32",
     "vendor/etc/vintf/manifest/android.hardware.gnss@1.0.xml": "895532cd39da43125863391a85186cdecdabecb445a4f7293bc4cb34f3a8cf13",
     "vendor/etc/media_profiles_V1_0.xml": "ed964883deb2d655e5d6b11131e60874559af9750c5cb97b041d4951f0c3c15e",
-    "system/etc/init/netd.rc": "2f7c87d4ef9ead02022702ebc76ce7e747fe7cc42f26a9fde047ee313a61b9c4",
-    "system/bin/waydroid-netd-direct-connect.sh": "36818e6b0f7bd3287f7d67337875a428b088ef4e8c52881f4021db7ed9e783e7",
 }
 
 JPEG_SOURCES = {
@@ -120,11 +123,34 @@ GNSS_FILES = [
 ]
 GNSS_ANCHORS = {
     "vendor/lib/hw/gps.msm8974.so": "0d9939282bf0f3546d7668ee69185c7fa038690b2913369fbb3b5a1b23de0eac",
+    "vendor/lib/libgps.utils.so": "4e7d338214035787ae540376606aa84c8b3cfca130a08a504ca69b49b7d3fcb0",
+    "vendor/lib/libloc_core.so": "67c87a77f07cafc558468e7bde30852877ed556e02ec782dde0e11c1bd2aa9f9",
     "vendor/lib/libloc_eng.so": "f28f81fea50981a589331a3cb6326ba5750187d1b5065e155474035aa64ea2e3",
+    "vendor/lib/libloc_api_v02.so": "8034eec05af02ff3260b102d5f6513011cc1b077098e76a6fceabd6f832c62d0",
+    "vendor/lib/libloc_ds_api.so": "4f566271f9c8144bb7e51b0026966682631e3dc372f0a00ad6ab8316b1770c3e",
+    "vendor/lib/libqmi_cci.so": "3f6583d9c8c5131280d9198ce603002e77df57842f99ca18a084d66a01356b3d",
+    "vendor/lib/libqmi_common_so.so": "780130e8ca5bbf3d58431b831b992f09e389ae4dc5162041c62ff9b8ccd8965b",
+    "vendor/lib/libqmi_csi.so": "e44977271b45c57f12bbad0fcb0536ee55df7556a02d8139352717f9671d3444",
+    "vendor/lib/libqmiservices.so": "d9ceafd196a03bcefe7be77fbca8f329960ec46098a198a2a32a12e0542f92ec",
     "vendor/lib/libqmi_client_qmux.so": "2c08fd0915d526f0b9219b72d7f362a917d94a051e88e03d61519977fbdc3ff2",
+    "vendor/lib/libqmi_encdec.so": "bf4ba681b15ad26fbca3a51f0e56b32f392e213f114ce07e3d12bc27a73edba1",
+    "vendor/lib/libdsi_netctrl.so": "2e7b2550c0b73be501270d60e244aa18487731a719df28c6549fc1c583244781",
+    "vendor/lib/libdsutils.so": "3392f40383b71a88c2e9d418a160a6edafcc5b85076ad1f3c4bab6ac38d6b491",
+    "vendor/lib/libqcci_legacy.so": "8579770a22d4ae1236bd2e3729c6aaa6edb3367be239f24586ed85ca4ffddaf5",
+    "vendor/lib/libqdp.so": "6d6216b072483411ede78b4d49b1bd88682c58cad029ebc1ffb4a1d1731b4363",
+    "vendor/lib/libnetmgr.so": "d9fca3f29d5da585065cb743251b2b106076e370d06ed471166d9ef9fef80f40",
+    "vendor/lib/libqdi.so": "e8ef4ff8712276d7b1aa766c9f0c6ae8b3dc2c882817e2113fe6aabb0ce26063",
+    "vendor/lib/libidl.so": "b8d3925ba1ba555d43eee1acef922b953a8bbe0a4a35ccc77f8e9ec31024af69",
+    "vendor/lib/liblbs_core.so": "128e048c65ba2ee650f154498de8b4229d3fa0b855b7787cb2652a43af3839b2",
+    "vendor/lib/libizat_core.so": "f0012f7d97b44f9e16fada9c2152e3bf46672b27298f136cf34b3719abd79b54",
+    "vendor/lib/libgeofence.so": "7b04ba04e18dd853675ac4277e37930c661088d7e8148ca1b42cd7b3c8fac341",
 }
 
-CONFIG_HEADER = "# Generated by waydroid-android-hammerhead; do not edit."
+SYSTEM_LIB_CONTEXT = "u:object_r:system_lib_file:s0"
+VENDOR_FILE_CONTEXT = "u:object_r:vendor_file:s0"
+SAME_PROCESS_CONTEXT = "u:object_r:same_process_hal_file:s0"
+VENDOR_CONFIG_CONTEXT = "u:object_r:vendor_configs_file:s0"
+GNSS_EXEC_CONTEXT = "u:object_r:hal_gnss_default_exec:s0"
 
 
 class PrepError(Exception):
@@ -142,17 +168,31 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def run(args, capture=False):
-    if capture:
-        return subprocess.check_output(args, universal_newlines=True, stderr=subprocess.STDOUT).strip()
-    subprocess.check_call(args)
-    return ""
+def run(args, capture=False, check=True):
+    proc = subprocess.run(
+        [str(x) for x in args],
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.STDOUT if capture else None,
+        universal_newlines=True,
+        check=False,
+    )
+    if check and proc.returncode != 0:
+        out = proc.stdout or ""
+        raise PrepError("command failed rc=%d: %s\n%s" % (
+            proc.returncode, " ".join(str(x) for x in args), out))
+    return (proc.stdout or "").strip() if capture else ""
+
+
+def require_tool(name):
+    path = shutil.which(name)
+    if not path:
+        raise PrepError("required tool is missing: %s" % name)
+    return path
 
 
 def container_state():
     try:
-        value = run(["lxc-info", "-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-sH"], True)
-        return value.strip()
+        return run(["lxc-info", "-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-sH"], True, False).strip() or "STOPPED"
     except Exception:
         return "STOPPED"
 
@@ -160,204 +200,195 @@ def container_state():
 def ensure_stopped():
     state = container_state()
     if state in ("RUNNING", "FROZEN"):
-        raise PrepError("Waydroid is %s; stop it before preparing Android overrides" % state)
+        raise PrepError("Waydroid is %s; stop it before preparing Android images" % state)
 
 
-def image_identity(path):
-    real = Path(os.path.realpath(str(path)))
-    if not real.is_file():
-        raise PrepError("missing Waydroid image: %s" % path)
-    st = real.stat()
-    return {
-        "path": str(real),
-        "size": st.st_size,
-        "mtime_ns": getattr(st, "st_mtime_ns", int(st.st_mtime * 1000000000)),
-    }
+def resolve_image(link):
+    path = Path(os.path.realpath(str(link)))
+    if not path.is_file():
+        raise PrepError("missing Waydroid image: %s" % link)
+    return path
 
 
 def image_has_loop(path):
-    real = os.path.realpath(str(path))
-    try:
-        out = run(["losetup", "-j", real], True)
-    except subprocess.CalledProcessError:
-        return False
+    out = run(["losetup", "-j", os.path.realpath(str(path))], True, False)
     return bool(out.strip())
 
 
-@contextlib.contextmanager
-def mounted_image(path, label):
-    real = os.path.realpath(str(path))
-    if image_has_loop(real):
-        raise PrepError("%s image already has a loop attachment; reboot without starting Waydroid and retry" % label)
+def verify_stock_image(path, expected_sha, expected_size, label):
+    size = path.stat().st_size
+    if size != expected_size:
+        raise PrepError("%s image size=%d, expected pristine size=%d" % (label, size, expected_size))
+    digest = sha256_file(path)
+    if digest != expected_sha:
+        raise PrepError("%s image SHA-256=%s, expected pristine=%s" % (label, digest, expected_sha))
 
-    loop = run(["losetup", "-f"], True)
-    if not loop:
-        raise PrepError("no free loop device for %s image" % label)
 
-    mount_dir = Path(tempfile.mkdtemp(prefix="waydroid-hammerhead-%s-" % label, dir="/mnt"))
-    attached = False
-    mounted = False
+def debugfs(image, command, write=False, check=True):
+    args = [require_tool("debugfs")]
+    if write:
+        args.append("-w")
+    args += ["-R", command, str(image)]
+    out = run(args, True, False)
+    # debugfs historically returns success for a number of command-level errors;
+    # reject the common fatal forms explicitly and rely on post-write verification.
+    fatal_markers = (
+        "File not found by ext2_lookup",
+        "Filesystem opened read/only",
+        "Command not found",
+        "while opening filesystem",
+    )
+    if check and any(marker in out for marker in fatal_markers):
+        raise PrepError("debugfs failed: %s\n%s" % (command, out))
+    return out
+
+
+def debugfs_exists(image, path):
+    out = debugfs(image, "stat %s" % path, check=False)
+    return "File not found by ext2_lookup" not in out and "Inode:" in out
+
+
+def debugfs_dump(image, path, host):
+    host = Path(host)
+    if host.exists():
+        host.unlink()
+    out = debugfs(image, "dump %s %s" % (path, host), check=False)
+    if not host.is_file():
+        raise PrepError("cannot dump %s from %s: %s" % (path, image, out))
+
+
+def debugfs_mkdirs(image, path):
+    current = ""
+    for part in Path(path).parts:
+        if part == "/":
+            continue
+        current += "/" + part
+        if not debugfs_exists(image, current):
+            debugfs(image, "mkdir %s" % current, write=True)
+            if not debugfs_exists(image, current):
+                raise PrepError("failed to create directory in image: %s" % current)
+
+
+def debugfs_set_context(image, path, context):
+    with tempfile.NamedTemporaryFile(prefix="hammerhead-selinux-", delete=False) as tmp:
+        tmp.write(context.encode("ascii") + b"\0")
+        tmp_path = tmp.name
     try:
-        run(["losetup", loop, real])
-        attached = True
-        run(["mount", "-t", "ext4", "-o", "ro,noload,noatime", loop, str(mount_dir)])
-        mounted = True
-        yield mount_dir
-    finally:
-        if mounted:
-            try:
-                run(["umount", str(mount_dir)])
-            except Exception as exc:
-                print("%s: WARNING: failed to unmount %s: %s" % (PACKAGE, mount_dir, exc), file=sys.stderr)
+        debugfs(image, "ea_set -f %s %s security.selinux" % (tmp_path, path), write=True)
+        verify = tempfile.NamedTemporaryFile(prefix="hammerhead-selinux-check-", delete=False)
+        verify.close()
         try:
-            mount_dir.rmdir()
-        except OSError:
-            pass
-        if attached:
+            Path(verify.name).unlink()
+            out = debugfs(image, "ea_get -f %s %s security.selinux" % (verify.name, path), check=False)
+            if not Path(verify.name).is_file():
+                raise PrepError("failed to read SELinux xattr for %s: %s" % (path, out))
+            got = Path(verify.name).read_bytes().rstrip(b"\0").decode("ascii")
+            if got != context:
+                raise PrepError("SELinux xattr mismatch for %s: %r != %r" % (path, got, context))
+        finally:
             try:
-                run(["losetup", "-d", loop])
-            except Exception as exc:
-                print("%s: WARNING: failed to detach %s: %s" % (PACKAGE, loop, exc), file=sys.stderr)
-
-
-def copy_xattrs_best_effort(src, dst):
-    if not hasattr(os, "listxattr"):
-        return
-    try:
-        names = os.listxattr(str(src), follow_symlinks=False)
-    except (OSError, TypeError):
-        return
-    for name in names:
+                Path(verify.name).unlink()
+            except FileNotFoundError:
+                pass
+    finally:
         try:
-            value = os.getxattr(str(src), name, follow_symlinks=False)
-            os.setxattr(str(dst), name, value, follow_symlinks=False)
-        except (OSError, TypeError):
+            Path(tmp_path).unlink()
+        except FileNotFoundError:
             pass
 
 
-def copy_regular_verified(src, dst, expected_sha=None):
-    src = Path(src)
-    dst = Path(dst)
-    if not src.is_file():
-        raise PrepError("missing source file: %s" % src)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    st = src.stat()
-    fd = os.open(str(dst), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IMODE(st.st_mode))
+def debugfs_replace(image, image_path, host_path, digest, mode, uid, gid, context=None):
+    host_path = Path(host_path)
+    if sha256_file(host_path) != digest:
+        raise PrepError("source SHA-256 mismatch for %s" % host_path)
+    debugfs_mkdirs(image, str(Path(image_path).parent))
+    if debugfs_exists(image, image_path):
+        debugfs(image, "rm %s" % image_path, write=True)
+    debugfs(image, "write %s %s" % (host_path, image_path), write=True)
+    debugfs(image, "set_inode_field %s mode 0%o" % (image_path, stat.S_IFREG | mode), write=True)
+    debugfs(image, "set_inode_field %s uid %d" % (image_path, uid), write=True)
+    debugfs(image, "set_inode_field %s gid %d" % (image_path, gid), write=True)
+    if context is not None:
+        debugfs_set_context(image, image_path, context)
+    else:
+        # A newly allocated inode should have no SELinux xattr. Ensure a stale
+        # one was not inherited by an unusual debugfs implementation.
+        attrs = debugfs(image, "ea_list %s" % image_path, check=False)
+        if "security.selinux" in attrs:
+            debugfs(image, "ea_rm %s security.selinux" % image_path, write=True)
+    with tempfile.NamedTemporaryFile(prefix="hammerhead-verify-", delete=False) as tmp:
+        verify_path = Path(tmp.name)
     try:
-        with open(str(src), "rb") as inp:
-            while True:
-                chunk = inp.read(1024 * 1024)
-                if not chunk:
-                    break
-                view = memoryview(chunk)
-                while view:
-                    written = os.write(fd, view)
-                    view = view[written:]
-        os.fsync(fd)
+        verify_path.unlink()
+        debugfs_dump(image, image_path, verify_path)
+        got = sha256_file(verify_path)
+        if got != digest:
+            raise PrepError("image write verification failed for %s: %s" % (image_path, got))
     finally:
-        os.close(fd)
-    os.chmod(str(dst), stat.S_IMODE(st.st_mode))
-    try:
-        os.utime(str(dst), (st.st_atime, st.st_mtime))
-    except OSError:
-        pass
-    copy_xattrs_best_effort(src, dst)
-    actual = sha256_file(dst)
-    source_sha = sha256_file(src)
-    if actual != source_sha:
-        raise PrepError("copy verification failed: %s" % src)
-    if expected_sha and actual != expected_sha:
-        raise PrepError("unexpected SHA-256 for %s: %s" % (src, actual))
-    return actual
-
-
-def copy_tree_verified(src, dst):
-    src = Path(src)
-    dst = Path(dst)
-    if not src.is_dir():
-        raise PrepError("missing source directory: %s" % src)
-    dst.mkdir(parents=True, exist_ok=True)
-    os.chmod(str(dst), stat.S_IMODE(src.stat().st_mode))
-    for child in sorted(src.iterdir(), key=lambda p: p.name):
-        out = dst / child.name
-        st = child.lstat()
-        if stat.S_ISLNK(st.st_mode):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            os.symlink(os.readlink(str(child)), str(out))
-        elif stat.S_ISDIR(st.st_mode):
-            copy_tree_verified(child, out)
-        elif stat.S_ISREG(st.st_mode):
-            copy_regular_verified(child, out)
-        else:
-            raise PrepError("unsupported file type while copying %s" % child)
-    copy_xattrs_best_effort(src, dst)
+        try:
+            verify_path.unlink()
+        except FileNotFoundError:
+            pass
+    info = debugfs(image, "stat %s" % image_path)
+    if ("Mode:  %04o" % mode) not in info:
+        raise PrepError("mode verification failed for %s\n%s" % (image_path, info))
+    if ("User: %5d" % uid) not in info and ("User:     %d" % uid) not in info:
+        # debugfs field width varies between e2fsprogs releases; fall back to a
+        # compact whitespace-insensitive check.
+        compact = " ".join(info.split())
+        if "User: %d" % uid not in compact:
+            raise PrepError("uid verification failed for %s\n%s" % (image_path, info))
+    compact = " ".join(info.split())
+    if "Group: %d" % gid not in compact:
+        raise PrepError("gid verification failed for %s\n%s" % (image_path, info))
 
 
 def safe_tar_name(name):
     p = Path(name)
-    if p.is_absolute() or ".." in p.parts:
-        return False
-    return True
+    return not p.is_absolute() and ".." not in p.parts
 
 
 def extract_open_payload(dst):
+    if not OPEN_ARCHIVE.is_file() or not OPEN_ARCHIVE_SHA_FILE.is_file():
+        raise PrepError("packaged open payload is missing")
     expected_archive = OPEN_ARCHIVE_SHA_FILE.read_text().split()[0]
     actual_archive = sha256_file(OPEN_ARCHIVE)
     if actual_archive != expected_archive:
         raise PrepError("open payload archive checksum mismatch")
-
     with tarfile.open(str(OPEN_ARCHIVE), "r:gz") as tf:
         for member in tf.getmembers():
             if not safe_tar_name(member.name):
                 raise PrepError("unsafe open payload member: %s" % member.name)
+            if not member.isfile():
+                continue
             target = dst / member.name
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
-                os.chmod(str(target), member.mode & 0o7777)
-            elif member.isfile():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                src = tf.extractfile(member)
-                if src is None:
-                    raise PrepError("cannot read open payload member %s" % member.name)
-                fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, member.mode & 0o7777)
-                try:
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        view = memoryview(chunk)
-                        while view:
-                            written = os.write(fd, view)
-                            view = view[written:]
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                    src.close()
-            else:
-                raise PrepError("unsupported open payload member type: %s" % member.name)
-
-    manifest_path = dst / "SHA256SUMS"
-    if not manifest_path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            src = tf.extractfile(member)
+            if src is None:
+                raise PrepError("cannot read open payload member %s" % member.name)
+            with open(str(target), "wb") as out:
+                shutil.copyfileobj(src, out, 1024 * 1024)
+            src.close()
+    manifest = dst / "SHA256SUMS"
+    if not manifest.is_file():
         raise PrepError("open payload manifest missing")
-    for line in manifest_path.read_text().splitlines():
+    for line in manifest.read_text().splitlines():
         if not line.strip():
             continue
         digest, rel = line.split(None, 1)
-        rel = rel.strip()
+        path = dst / rel.strip()
+        if not path.is_file() or sha256_file(path) != digest:
+            raise PrepError("open payload verification failed: %s" % rel.strip())
+    for rel, digest in OPEN_REQUIRED_VENDOR.items():
         path = dst / rel
         if not path.is_file() or sha256_file(path) != digest:
-            raise PrepError("open payload verification failed: %s" % rel)
-
-    for rel, digest in OPEN_REQUIRED.items():
-        path = dst / rel
-        if not path.is_file() or sha256_file(path) != digest:
-            raise PrepError("required open payload identity mismatch: %s" % rel)
+            raise PrepError("required open vendor payload identity mismatch: %s" % rel)
     return actual_archive
 
 
 def locate_graphics_archive():
-    env = os.environ.get("WAYDROID_HAMMERHEAD_GRAPHICS_ARCHIVE")
     candidates = []
+    env = os.environ.get("WAYDROID_HAMMERHEAD_GRAPHICS_ARCHIVE")
     if env:
         candidates.append(Path(env))
     candidates.extend([
@@ -375,14 +406,10 @@ def locate_graphics_archive():
         mismatches.append("%s=%s" % (path, digest))
     if mismatches:
         raise PrepError("found graphics archive with wrong checksum: %s" % "; ".join(mismatches))
-    raise PrepError(
-        "missing proprietary graphics archive %s (expected SHA-256 %s); place it in %s"
-        % (GRAPHICS_NAME, GRAPHICS_SHA, PROPRIETARY_DIR)
-    )
+    raise PrepError("missing proprietary graphics archive %s (expected SHA-256 %s)" % (GRAPHICS_NAME, GRAPHICS_SHA))
 
 
 def extract_graphics(archive, dst):
-    dst = Path(dst)
     with tarfile.open(str(archive), "r:*") as tf:
         members = tf.getmembers()
         for wanted in GRAPHICS_FILES:
@@ -394,153 +421,21 @@ def extract_graphics(archive, dst):
                     matches.append(member)
             if len(matches) != 1:
                 raise PrepError("graphics archive expected one %s, found %d" % (wanted, len(matches)))
-            member = matches[0]
-            src = tf.extractfile(member)
+            src = tf.extractfile(matches[0])
             if src is None:
-                raise PrepError("cannot read graphics archive member %s" % member.name)
+                raise PrepError("cannot read graphics archive member %s" % matches[0].name)
             target = dst / wanted
             target.parent.mkdir(parents=True, exist_ok=True)
-            data = src.read()
+            target.write_bytes(src.read())
             src.close()
-            target.write_bytes(data)
-            os.chmod(str(target), member.mode & 0o7777)
-
     eglsub = dst / "vendor/lib/egl/eglsubAndroid.so"
     data = bytearray(eglsub.read_bytes())
     if len(data) <= 0x8e1c:
         raise PrepError("eglsubAndroid.so is too small for compatibility patch")
     data[0x8e14:0x8e1c] = bytes.fromhex("010000000d000000")
     eglsub.write_bytes(data)
-    os.chmod(str(eglsub), 0o644)
     if sha256_file(eglsub) != FINAL_EGLSUB_SHA:
         raise PrepError("patched eglsubAndroid.so checksum mismatch")
-
-
-def derive_libegl(system_root, dst):
-    candidates = [
-        system_root / "system/lib/libEGL.so",
-        system_root / "lib/libEGL.so",
-        system_root / "system/system/lib/libEGL.so",
-    ]
-    src = next((p for p in candidates if p.is_file()), None)
-    if src is None:
-        raise PrepError("cannot locate system/lib/libEGL.so in system.img")
-    data = bytearray(src.read_bytes())
-    initial = hashlib.sha256(data).hexdigest()
-    if initial == FINAL_LIBEGL_SHA:
-        pass
-    elif initial == STAGE1_LIBEGL_SHA:
-        if data[0xCCC0:0xCCC4] != bytes.fromhex("00f048b8"):
-            raise PrepError("stage-1 libEGL guard bytes do not match")
-        if data[0x11F9A:0x11F9E] != bytes.fromhex("d0f8cc21"):
-            raise PrepError("stage-1 libEGL query-route source bytes do not match")
-        data[0x11F9A:0x11F9E] = bytes.fromhex("d0f8c821")
-    elif initial == STOCK_LIBEGL_SHA:
-        if data[0xCCC0:0xCCC4] != bytes.fromhex("d8f81870"):
-            raise PrepError("stock libEGL blob-cache source bytes do not match")
-        if data[0x11F9A:0x11F9E] != bytes.fromhex("d0f8cc21"):
-            raise PrepError("stock libEGL query-route source bytes do not match")
-        data[0xCCC0:0xCCC4] = bytes.fromhex("00f048b8")
-        data[0x11F9A:0x11F9E] = bytes.fromhex("d0f8c821")
-    else:
-        raise PrepError("unexpected stock Waydroid libEGL.so SHA-256: %s" % initial)
-
-    final = hashlib.sha256(data).hexdigest()
-    if final != FINAL_LIBEGL_SHA:
-        raise PrepError("derived libEGL.so checksum mismatch: %s" % final)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_bytes(data)
-    os.chmod(str(dst), stat.S_IMODE(src.stat().st_mode))
-    return initial
-
-
-def derive_vendor_build_prop(vendor_root, dst):
-    candidates = [vendor_root / "build.prop", vendor_root / "vendor/build.prop"]
-    src = next((p for p in candidates if p.is_file()), None)
-    if src is None:
-        raise PrepError("cannot locate vendor build.prop in vendor.img")
-    raw = src.read_bytes()
-    initial = hashlib.sha256(raw).hexdigest()
-    if initial == FINAL_VENDOR_BUILD_PROP_SHA:
-        final = raw
-    else:
-        if initial != STOCK_VENDOR_BUILD_PROP_SHA:
-            raise PrepError("unexpected stock vendor build.prop SHA-256: %s" % initial)
-        text = raw.decode("utf-8")
-        if "import /vendor/waydroid.prop" in text:
-            raise PrepError("stock vendor build.prop contains an unexpected Waydroid import")
-        final = (text + VENDOR_IMPORT_BLOCK).encode("utf-8")
-    if hashlib.sha256(final).hexdigest() != FINAL_VENDOR_BUILD_PROP_SHA:
-        raise PrepError("derived vendor build.prop checksum mismatch")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_bytes(final)
-    os.chmod(str(dst), 0o600)
-    return initial
-
-
-def prepare_apex(system_root, open_root, dst):
-    candidates = [
-        system_root / "system/apex/com.android.media.swcodec",
-        system_root / "apex/com.android.media.swcodec",
-        system_root / "system/system/apex/com.android.media.swcodec",
-    ]
-    src = next((p for p in candidates if p.is_dir()), None)
-    if src is None:
-        raise PrepError("cannot locate flattened com.android.media.swcodec in system.img")
-
-    dirs = 0
-    files = 0
-    symlinks = 0
-    for p in src.rglob("*"):
-        mode = p.lstat().st_mode
-        if stat.S_ISDIR(mode):
-            dirs += 1
-        elif stat.S_ISREG(mode):
-            files += 1
-        elif stat.S_ISLNK(mode):
-            symlinks += 1
-        else:
-            raise PrepError("unexpected APEX file type: %s" % p)
-    if (dirs, files, symlinks) != (4, 95, 0):
-        raise PrepError("unexpected media.swcodec tree shape: dirs=%d files=%d symlinks=%d" % (dirs, files, symlinks))
-
-    stock_util = src / "lib/libsfplugin_ccodec_utils.so"
-    if not stock_util.is_file():
-        raise PrepError("stock media.swcodec utility missing")
-    if stock_util.stat().st_size != STOCK_APEX_UTIL_SIZE or sha256_file(stock_util) != STOCK_APEX_UTIL_SHA:
-        raise PrepError("stock media.swcodec utility identity mismatch")
-
-    copy_tree_verified(src, dst)
-    patched = open_root / "system/lib/libsfplugin_ccodec_utils.so"
-    if patched.stat().st_size != FINAL_APEX_UTIL_SIZE or sha256_file(patched) != FINAL_APEX_UTIL_SHA:
-        raise PrepError("packaged Codec2 utility identity mismatch")
-    copy_regular_verified(patched, dst / "lib/libsfplugin_ccodec_utils.so", FINAL_APEX_UTIL_SHA)
-
-    # Complete copy validation: all source entries except the intended utility
-    # must remain byte-identical.
-    for source in src.rglob("*"):
-        rel = source.relative_to(src)
-        target = dst / rel
-        if source.is_dir():
-            if not target.is_dir():
-                raise PrepError("APEX directory missing after copy: %s" % rel)
-        elif source.is_file():
-            if rel == Path("lib/libsfplugin_ccodec_utils.so"):
-                continue
-            if not target.is_file() or sha256_file(source) != sha256_file(target):
-                raise PrepError("APEX copied file differs unexpectedly: %s" % rel)
-
-
-def prepare_vintf(vendor_root, open_root, dst):
-    source = vendor_root / "etc/vintf"
-    if source.is_dir():
-        copy_tree_verified(source, dst)
-    else:
-        dst.mkdir(parents=True, exist_ok=True)
-    manifest = dst / "manifest"
-    manifest.mkdir(parents=True, exist_ok=True)
-    src_xml = open_root / "vendor/etc/vintf/manifest/android.hardware.gnss@1.0.xml"
-    copy_regular_verified(src_xml, manifest / src_xml.name, OPEN_REQUIRED["vendor/etc/vintf/manifest/android.hardware.gnss@1.0.xml"])
 
 
 def copy_private_jpeg(dst):
@@ -549,7 +444,11 @@ def copy_private_jpeg(dst):
         src = next((p for p in candidates if p.is_file()), None)
         if src is None:
             raise PrepError("missing Hammerhead JPEG blob on Sailfish adaptation: %s" % name)
-        copy_regular_verified(src, dst / "vendor/lib" / name, digest)
+        if sha256_file(src) != digest:
+            raise PrepError("unexpected Hammerhead JPEG blob identity: %s" % src)
+        target = dst / "vendor/lib" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(src), str(target))
 
 
 def copy_private_gnss(dst):
@@ -558,36 +457,104 @@ def copy_private_gnss(dst):
         if not src.is_file():
             raise PrepError("missing Hammerhead GNSS/QMI blob: %s" % src)
         expected = GNSS_ANCHORS.get(rel)
-        copy_regular_verified(src, dst / rel, expected)
+        if expected and sha256_file(src) != expected:
+            raise PrepError("unexpected Hammerhead GNSS/QMI blob identity: %s" % src)
+        target = dst / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(str(src), str(target))
 
-    gps = Path("/system/etc/gps.conf")
-    if not gps.is_file():
-        raise PrepError("missing Hammerhead /system/etc/gps.conf")
-    copy_regular_verified(gps, dst / "system/etc/gps.conf")
 
-    flp = Path("/system/etc/flp.conf")
-    if flp.is_file():
-        copy_regular_verified(flp, dst / "system/etc/flp.conf")
+def derive_system_files(system_image, dst):
+    dst.mkdir(parents=True, exist_ok=True)
+    libegl_stock = dst / "libEGL.stock.so"
+    debugfs_dump(system_image, "/system/lib/libEGL.so", libegl_stock)
+    data = bytearray(libegl_stock.read_bytes())
+    if hashlib.sha256(data).hexdigest() != STOCK_LIBEGL_SHA:
+        raise PrepError("unexpected pristine libEGL.so")
+    if data[0xCCC0:0xCCC4] != bytes.fromhex("d8f81870"):
+        raise PrepError("stock libEGL blob-cache guard bytes do not match")
+    if data[0x11F9A:0x11F9E] != bytes.fromhex("d0f8cc21"):
+        raise PrepError("stock libEGL query-route guard bytes do not match")
+    data[0xCCC0:0xCCC4] = bytes.fromhex("00f048b8")
+    data[0x11F9A:0x11F9E] = bytes.fromhex("d0f8c821")
+    libegl = dst / "libEGL.so"
+    libegl.write_bytes(data)
+    if sha256_file(libegl) != FINAL_LIBEGL_SHA:
+        raise PrepError("derived libEGL.so checksum mismatch")
+
+    sf_stock = dst / "libsurfaceflinger.stock.so"
+    debugfs_dump(system_image, "/system/lib/libsurfaceflinger.so", sf_stock)
+    data = bytearray(sf_stock.read_bytes())
+    if hashlib.sha256(data).hexdigest() != STOCK_SURFACEFLINGER_SHA:
+        raise PrepError("unexpected pristine libsurfaceflinger.so")
+    # Reproduce the exact final proven SurfaceFlinger binary from the pinned
+    # pristine image. The first five ranges are the retained EGLConfig fixes;
+    # the final range is the Stage-7 CPU-fence fix.
+    sf_patches = (
+        (0x1164E0, "2e",   "38"),
+        (0x1164E2, "0024", "79a4"),
+        (0x1164F8, "0c9e", "0126"),
+        (0x1166C8, "00bf", "3830"),
+        (0x1166CB, "bf",   "00"),
+        (0x117BBA, "18b3", "23e0"),
+    )
+
+    for offset, before_hex, after_hex in sf_patches:
+        before = bytes.fromhex(before_hex)
+        after = bytes.fromhex(after_hex)
+
+        if len(before) != len(after):
+            raise PrepError(
+                "invalid SurfaceFlinger patch length at 0x%x" % offset
+            )
+
+        end = offset + len(before)
+
+        if data[offset:end] != before:
+            raise PrepError(
+                "stock SurfaceFlinger guard bytes do not match at 0x%x"
+                % offset
+            )
+
+        data[offset:end] = after
+    sf = dst / "libsurfaceflinger.so"
+    sf.write_bytes(data)
+    if sha256_file(sf) != FINAL_SURFACEFLINGER_SHA:
+        raise PrepError("derived libsurfaceflinger.so checksum mismatch")
+    return libegl, sf
+
+
+def derive_vendor_build_prop(vendor_image, dst):
+    stock = dst / "build.prop.stock"
+    debugfs_dump(vendor_image, "/build.prop", stock)
+    raw = stock.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != STOCK_VENDOR_BUILD_PROP_SHA:
+        raise PrepError("unexpected pristine vendor build.prop")
+    text = raw.decode("utf-8")
+    if "import /vendor/waydroid.prop" in text:
+        raise PrepError("pristine vendor build.prop unexpectedly contains Waydroid import")
+    target = dst / "build.prop"
+    target.write_bytes((text + VENDOR_IMPORT_BLOCK).encode("utf-8"))
+    if sha256_file(target) != FINAL_VENDOR_BUILD_PROP_SHA:
+        raise PrepError("derived vendor build.prop checksum mismatch")
+    return target
 
 
 def camera_data_home():
     try:
         entry = pwd.getpwuid(100000)
         home = Path(entry.pw_dir)
-        uid = entry.pw_uid
-        gid = entry.pw_gid
+        uid, gid = entry.pw_uid, entry.pw_gid
     except KeyError:
         home = Path("/home/defaultuser")
-        uid = 100000
-        gid = 100000
+        uid = gid = 100000
     return home / ".local/share/waydroid/data", uid, gid
 
 
 def ensure_camera_symlinks():
     data, uid, gid = camera_data_home()
-    created = []
-    current = data
     missing = []
+    current = data
     while not current.exists() and str(current) != "/":
         missing.append(current)
         current = current.parent
@@ -607,303 +574,301 @@ def ensure_camera_symlinks():
         if path.exists():
             raise PrepError("camera socket bridge path exists but is not our symlink: %s" % path)
         os.symlink(target, str(path))
-        created.append(path)
-    return created
 
 
-def atomic_write(path, text, mode=0o644):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w") as out:
-            out.write(text)
-            out.flush()
-            os.fsync(out.fileno())
-        os.chmod(str(tmp), mode)
-        os.replace(str(tmp), str(path))
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+def run_fsck(path):
+    require_tool("e2fsck")
+    proc = subprocess.run(["e2fsck", "-fy", str(path)], check=False)
+    # e2fsck 0=no errors, 1=errors corrected. Values >=2 require intervention.
+    if proc.returncode not in (0, 1):
+        raise PrepError("e2fsck failed for %s with rc=%d" % (path, proc.returncode))
 
 
-def bind_line(source, target, create="file"):
-    return "lxc.mount.entry = %s %s none bind,ro,create=%s 0 0" % (source, target, create)
+def resize_vendor(vendor):
+    if vendor.stat().st_size != STOCK_VENDOR_SIZE:
+        raise PrepError("vendor.img is not pristine size before expansion")
+    run_fsck(vendor)
+    os.truncate(str(vendor), FINAL_VENDOR_SIZE)
+    run([require_tool("resize2fs"), str(vendor)])
+    if vendor.stat().st_size != FINAL_VENDOR_SIZE:
+        raise PrepError("vendor.img file size did not reach expected final size")
 
 
-def build_config(runtime):
-    o = runtime / "open"
-    p = runtime / "private"
-    g = runtime / "generated"
-    lines = [CONFIG_HEADER, "# Prepared Android-side Hammerhead overrides.", ""]
+def install_system(system, stage):
+    libegl, sf = derive_system_files(system, stage / "derived-system")
+    netd = SYSTEM_PAYLOAD_DIR / "netd.rc"
+    direct = SYSTEM_PAYLOAD_DIR / "waydroid-netd-direct-connect.sh"
+    if not netd.is_file() or sha256_file(netd) != FINAL_NETD_SHA:
+        raise PrepError("packaged final netd.rc identity mismatch")
+    if not direct.is_file() or sha256_file(direct) != FINAL_DIRECT_CONNECT_SHA:
+        raise PrepError("packaged direct-connect helper identity mismatch")
+    debugfs_replace(system, "/system/lib/libEGL.so", libegl, FINAL_LIBEGL_SHA,
+                    0o644, 0, 0, SYSTEM_LIB_CONTEXT)
+    debugfs_replace(system, "/system/lib/libsurfaceflinger.so", sf,
+                    FINAL_SURFACEFLINGER_SHA, 0o644, 0, 0, SYSTEM_LIB_CONTEXT)
+    debugfs_replace(system, "/system/etc/init/netd.rc", netd, FINAL_NETD_SHA,
+                    0o644, 0, 0, None)
+    debugfs_replace(system, "/system/bin/waydroid-netd-direct-connect.sh", direct,
+                    FINAL_DIRECT_CONNECT_SHA, 0o755, 0, 2000, None)
 
-    open_mounts = [
-        (o / "vendor/lib/hw/hwcomposer.waydroid.so", "vendor/lib/hw/hwcomposer.waydroid.so", "file"),
-        (o / "vendor/lib/hw/camera.hammerhead.so", "vendor/lib/hw/camera.hammerhead.so", "file"),
-        (o / "vendor/lib/hw/gralloc.msm8974.so", "vendor/lib/hw/gralloc.msm8974.so", "file"),
-        (o / "vendor/lib/libmmcamera_interface.so", "vendor/lib/libmmcamera_interface.so", "file"),
-        (o / "vendor/lib/libmmjpeg_interface.so", "vendor/lib/libmmjpeg_interface.so", "file"),
-        (o / "vendor/lib/libqomx_core.so", "vendor/lib/libqomx_core.so", "file"),
-        (o / "vendor/bin/hw/android.hardware.gnss@1.0-service", "vendor/bin/hw/android.hardware.gnss@1.0-service", "file"),
-        (o / "vendor/lib/hw/android.hardware.gnss@1.0-impl.so", "vendor/lib/hw/android.hardware.gnss@1.0-impl.so", "file"),
-        (o / "vendor/etc/init/android.hardware.gnss@1.0-service.rc", "vendor/etc/init/android.hardware.gnss@1.0-service.rc", "file"),
-        (o / "vendor/etc/media_profiles_V1_0.xml", "vendor/etc/media_profiles_V1_0.xml", "file"),
-        (o / "system/etc/init/netd.rc", "system/etc/init/netd.rc", "file"),
-        (o / "system/bin/waydroid-netd-direct-connect.sh", "system/bin/waydroid-netd-direct-connect.sh", "file"),
-    ]
-    lines.append("# Open/source-built payload")
-    for source, target, create in open_mounts:
-        lines.append(bind_line(source, target, create))
 
-    lines.extend(["", "# Files derived from the device's own Waydroid images"])
-    lines.append(bind_line(g / "system/lib/libEGL.so", "system/lib/libEGL.so"))
-    lines.append(bind_line(g / "vendor/build.prop", "vendor/build.prop"))
-    lines.append(bind_line(g / "system/apex/com.android.media.swcodec", "system/apex/com.android.media.swcodec", "dir"))
-    lines.append(bind_line(g / "vendor/etc/vintf", "vendor/etc/vintf", "dir"))
+def vendor_specs(open_root, private_root, build_prop):
+    specs = []
+    def add(rel, src, digest, mode=0o644, uid=0, gid=0, context=VENDOR_FILE_CONTEXT):
+        image_rel = rel[7:] if rel.startswith("vendor/") else rel
+        specs.append(("/" + image_rel, Path(src), digest, mode, uid, gid, context))
 
-    lines.extend(["", "# Locally derived proprietary Hammerhead graphics blobs"])
+    add("vendor/lib/hw/hwcomposer.waydroid.so", open_root / "vendor/lib/hw/hwcomposer.waydroid.so",
+        OPEN_REQUIRED_VENDOR["vendor/lib/hw/hwcomposer.waydroid.so"])
+    add("vendor/lib/hw/camera.hammerhead.so", open_root / "vendor/lib/hw/camera.hammerhead.so",
+        OPEN_REQUIRED_VENDOR["vendor/lib/hw/camera.hammerhead.so"])
+    add("vendor/lib/hw/gralloc.msm8974.so", open_root / "vendor/lib/hw/gralloc.msm8974.so",
+        OPEN_REQUIRED_VENDOR["vendor/lib/hw/gralloc.msm8974.so"], context=SAME_PROCESS_CONTEXT)
+    for rel in ("vendor/lib/libmmcamera_interface.so", "vendor/lib/libmmjpeg_interface.so", "vendor/lib/libqomx_core.so"):
+        add(rel, open_root / rel, OPEN_REQUIRED_VENDOR[rel])
+    add("vendor/bin/hw/android.hardware.gnss@1.0-service",
+        open_root / "vendor/bin/hw/android.hardware.gnss@1.0-service",
+        OPEN_REQUIRED_VENDOR["vendor/bin/hw/android.hardware.gnss@1.0-service"],
+        mode=0o755, gid=2000, context=GNSS_EXEC_CONTEXT)
+    add("vendor/lib/hw/android.hardware.gnss@1.0-impl.so",
+        open_root / "vendor/lib/hw/android.hardware.gnss@1.0-impl.so",
+        OPEN_REQUIRED_VENDOR["vendor/lib/hw/android.hardware.gnss@1.0-impl.so"])
+    add("vendor/etc/init/android.hardware.gnss@1.0-service.rc",
+        open_root / "vendor/etc/init/android.hardware.gnss@1.0-service.rc",
+        OPEN_REQUIRED_VENDOR["vendor/etc/init/android.hardware.gnss@1.0-service.rc"],
+        context=VENDOR_CONFIG_CONTEXT)
+    add("vendor/etc/vintf/manifest/android.hardware.gnss@1.0.xml",
+        open_root / "vendor/etc/vintf/manifest/android.hardware.gnss@1.0.xml",
+        OPEN_REQUIRED_VENDOR["vendor/etc/vintf/manifest/android.hardware.gnss@1.0.xml"],
+        context=VENDOR_CONFIG_CONTEXT)
+    add("vendor/etc/media_profiles_V1_0.xml",
+        open_root / "vendor/etc/media_profiles_V1_0.xml",
+        OPEN_REQUIRED_VENDOR["vendor/etc/media_profiles_V1_0.xml"],
+        context=VENDOR_CONFIG_CONTEXT)
+
     for rel in GRAPHICS_FILES:
-        lines.append(bind_line(p / rel, rel))
-
-    lines.extend(["", "# Locally derived proprietary JPEG OMX blobs"])
-    for name in JPEG_SOURCES:
+        src = private_root / rel
+        digest = sha256_file(src)
+        add(rel, src, digest, context=SAME_PROCESS_CONTEXT)
+    for name, digest in JPEG_SOURCES.items():
         rel = "vendor/lib/%s" % name
-        lines.append(bind_line(p / rel, rel))
+        add(rel, private_root / rel, digest)
 
-    lines.extend(["", "# Locally derived proprietary GNSS/QMI stack"])
-    # Same legacy GPS HAL at both historical HAL names.
-    gps_source = p / "vendor/lib/hw/gps.msm8974.so"
-    lines.append(bind_line(gps_source, "vendor/lib/hw/gps.msm8974.so"))
-    lines.append(bind_line(gps_source, "vendor/lib/hw/gps.default.so"))
-    seen = set(["vendor/lib/hw/gps.msm8974.so"])
+    gps_rel = "vendor/lib/hw/gps.msm8974.so"
+    gps_src = private_root / gps_rel
+    gps_digest = sha256_file(gps_src)
+    add(gps_rel, gps_src, gps_digest)
+    add("vendor/lib/hw/gps.default.so", gps_src, gps_digest)
+    seen = {gps_rel}
     for _src, rel in GNSS_FILES:
         if rel in seen:
             continue
         seen.add(rel)
-        lines.append(bind_line(p / rel, rel))
-    lines.append(bind_line(p / "system/etc/gps.conf", "system/etc/gps.conf"))
-    if (p / "system/etc/flp.conf").is_file():
-        lines.append(bind_line(p / "system/etc/flp.conf", "system/etc/flp.conf"))
+        src = private_root / rel
+        add(rel, src, sha256_file(src))
 
-    lines.append("")
-    return "\n".join(str(x) for x in lines)
-
-
-def marker_expected(open_sha, system_id, vendor_id, graphics_sha):
-    return {
-        "schema": SCHEMA,
-        "open_archive_sha256": open_sha,
-        "system_image": system_id,
-        "vendor_image": vendor_id,
-        "graphics_archive_sha256": graphics_sha,
-    }
+    specs.append(("/build.prop", build_prop, FINAL_VENDOR_BUILD_PROP_SHA,
+                  0o600, 0, 0, VENDOR_FILE_CONTEXT))
+    return specs
 
 
-def load_marker():
-    path = RUNTIME / "state.json"
+def install_vendor(vendor, stage, graphics):
+    open_root = stage / "open"
+    private_root = stage / "private"
+    extract_open_payload(open_root)
+    extract_graphics(graphics, private_root)
+    copy_private_jpeg(private_root)
+    copy_private_gnss(private_root)
+    derived = stage / "derived-vendor"
+    derived.mkdir(parents=True, exist_ok=True)
+    build_prop = derive_vendor_build_prop(vendor, derived)
+    resize_vendor(vendor)
+    for image_path, source, digest, mode, uid, gid, context in vendor_specs(open_root, private_root, build_prop):
+        debugfs_replace(vendor, image_path, source, digest, mode, uid, gid, context)
+
+
+def key_hashes_ok(system, vendor):
+    checks = [
+        (system, "/system/lib/libEGL.so", FINAL_LIBEGL_SHA),
+        (system, "/system/lib/libsurfaceflinger.so", FINAL_SURFACEFLINGER_SHA),
+        (system, "/system/etc/init/netd.rc", FINAL_NETD_SHA),
+        (system, "/system/bin/waydroid-netd-direct-connect.sh", FINAL_DIRECT_CONNECT_SHA),
+        (vendor, "/lib/hw/hwcomposer.waydroid.so", OPEN_REQUIRED_VENDOR["vendor/lib/hw/hwcomposer.waydroid.so"]),
+        (vendor, "/lib/hw/camera.hammerhead.so", OPEN_REQUIRED_VENDOR["vendor/lib/hw/camera.hammerhead.so"]),
+        (vendor, "/lib/hw/gralloc.msm8974.so", OPEN_REQUIRED_VENDOR["vendor/lib/hw/gralloc.msm8974.so"]),
+        (vendor, "/lib/egl/eglsubAndroid.so", FINAL_EGLSUB_SHA),
+        (vendor, "/build.prop", FINAL_VENDOR_BUILD_PROP_SHA),
+    ]
+    with tempfile.TemporaryDirectory(prefix="hammerhead-keycheck-") as td:
+        for idx, (image, path, digest) in enumerate(checks):
+            out = Path(td) / str(idx)
+            try:
+                debugfs_dump(image, path, out)
+            except PrepError:
+                return False
+            if sha256_file(out) != digest:
+                return False
+    return True
+
+
+def load_state():
     try:
-        return json.loads(path.read_text())
+        return json.loads(STATE_FILE.read_text())
     except Exception:
         return None
 
 
-def runtime_key_hashes_ok():
-    checks = {
-        RUNTIME / "open/vendor/lib/hw/hwcomposer.waydroid.so": OPEN_REQUIRED["vendor/lib/hw/hwcomposer.waydroid.so"],
-        RUNTIME / "open/vendor/lib/hw/camera.hammerhead.so": OPEN_REQUIRED["vendor/lib/hw/camera.hammerhead.so"],
-        RUNTIME / "open/vendor/lib/hw/gralloc.msm8974.so": OPEN_REQUIRED["vendor/lib/hw/gralloc.msm8974.so"],
-        RUNTIME / "open/vendor/lib/libqomx_core.so": OPEN_REQUIRED["vendor/lib/libqomx_core.so"],
-        RUNTIME / "generated/system/lib/libEGL.so": FINAL_LIBEGL_SHA,
-        RUNTIME / "generated/vendor/build.prop": FINAL_VENDOR_BUILD_PROP_SHA,
-        RUNTIME / "generated/system/apex/com.android.media.swcodec/lib/libsfplugin_ccodec_utils.so": FINAL_APEX_UTIL_SHA,
-        RUNTIME / "private/vendor/lib/egl/eglsubAndroid.so": FINAL_EGLSUB_SHA,
+def save_state(system, vendor, open_sha):
+    state = {
+        "schema": SCHEMA,
+        "system": {
+            "path": str(system),
+            "size": system.stat().st_size,
+            "sha256": sha256_file(system),
+        },
+        "vendor": {
+            "path": str(vendor),
+            "size": vendor.stat().st_size,
+            "sha256": sha256_file(vendor),
+        },
+        "open_archive_sha256": open_sha,
+        "graphics_archive_sha256": GRAPHICS_SHA,
     }
-    for name, digest in JPEG_SOURCES.items():
-        checks[RUNTIME / "private/vendor/lib" / name] = digest
-    for rel, digest in GNSS_ANCHORS.items():
-        checks[RUNTIME / "private" / rel] = digest
-    for path, digest in checks.items():
-        if not path.is_file() or sha256_file(path) != digest:
-            return False
-    return True
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_name(".%s.%d" % (STATE_FILE.name, os.getpid()))
+    tmp.write_text(json.dumps(state, sort_keys=True, indent=2) + "\n")
+    os.chmod(str(tmp), 0o644)
+    os.replace(str(tmp), str(STATE_FILE))
+    return state
 
 
-def install_runtime(stage, marker):
-    state_path = stage / "state.json"
-    state_path.write_text(json.dumps(marker, sort_keys=True, indent=2) + "\n")
-    os.chmod(str(state_path), 0o644)
-
-    old = None
-    if RUNTIME.exists():
-        old = RUNTIME_PARENT / (".hammerhead-runtime.old-%d" % os.getpid())
-        if old.exists():
-            shutil.rmtree(str(old))
-        os.rename(str(RUNTIME), str(old))
+def state_matches(state, system, vendor):
+    if not state or state.get("schema") != SCHEMA:
+        return False
     try:
-        os.rename(str(stage), str(RUNTIME))
+        return (
+            state["system"]["path"] == str(system) and
+            state["system"]["size"] == system.stat().st_size and
+            state["system"]["sha256"] == sha256_file(system) and
+            state["vendor"]["path"] == str(vendor) and
+            state["vendor"]["size"] == vendor.stat().st_size and
+            state["vendor"]["sha256"] == sha256_file(vendor) and
+            state.get("graphics_archive_sha256") == GRAPHICS_SHA and
+            key_hashes_ok(system, vendor)
+        )
     except Exception:
-        if old is not None and old.exists() and not RUNTIME.exists():
-            os.rename(str(old), str(RUNTIME))
-        raise
-    if old is not None and old.exists():
-        shutil.rmtree(str(old))
+        return False
 
 
-def prepare_runtime(defer_ok):
+def remove_legacy_runtime():
+    if LEGACY_RUNTIME.is_dir():
+        shutil.rmtree(str(LEGACY_RUNTIME))
+    # config_android is package-generated in 0.2.0. The 0.3.0 configurator
+    # permanently strips its include. Remove the stale fragment itself too.
+    if LEGACY_CONFIG_ANDROID.is_file():
+        LEGACY_CONFIG_ANDROID.unlink()
+
+
+def prepare(defer_ok=False):
     ensure_stopped()
-
-    if not SYSTEM_IMAGE.exists() or not VENDOR_IMAGE.exists():
+    try:
+        system = resolve_image(SYSTEM_IMAGE_LINK)
+        vendor = resolve_image(VENDOR_IMAGE_LINK)
+    except PrepError:
         if defer_ok:
             print("%s: Waydroid images are not initialized; preparation deferred" % PACKAGE)
             return 0
-        raise PrepError("Waydroid images are not initialized")
+        raise
+    if image_has_loop(system) or image_has_loop(vendor):
+        raise PrepError("Waydroid image loop attachment exists; reboot without starting Waydroid and retry")
+    for tool in ("debugfs", "e2fsck", "resize2fs"):
+        require_tool(tool)
 
-    open_sha_expected = OPEN_ARCHIVE_SHA_FILE.read_text().split()[0]
+    state = load_state()
+    if state_matches(state, system, vendor):
+        remove_legacy_runtime()
+        ensure_camera_symlinks()
+        print("%s: Android images already prepared" % PACKAGE)
+        return 0
+
+    # Without a valid state marker, mutate only exact pristine pinned images.
+    # This makes an interrupted/partial preparation fail closed rather than
+    # guessing which files or filesystem metadata were already changed.
+    verify_stock_image(system, STOCK_SYSTEM_SHA, STOCK_SYSTEM_SIZE, "system")
+    verify_stock_image(vendor, STOCK_VENDOR_SHA, STOCK_VENDOR_SIZE, "vendor")
+    graphics = locate_graphics_archive()
     open_sha = sha256_file(OPEN_ARCHIVE)
-    if open_sha != open_sha_expected:
+    if open_sha != OPEN_ARCHIVE_SHA_FILE.read_text().split()[0]:
         raise PrepError("packaged open payload checksum mismatch")
 
-    system_id = image_identity(SYSTEM_IMAGE)
-    vendor_id = image_identity(VENDOR_IMAGE)
-    current = load_marker()
-
-    # Fast path does not require the proprietary archive to remain present.
-    if current and current.get("schema") == SCHEMA:
-        expected_no_graphics = {
-            "schema": SCHEMA,
-            "open_archive_sha256": open_sha,
-            "system_image": system_id,
-            "vendor_image": vendor_id,
-            "graphics_archive_sha256": current.get("graphics_archive_sha256"),
-        }
-        if current == expected_no_graphics and current.get("graphics_archive_sha256") == GRAPHICS_SHA and runtime_key_hashes_ok():
-            ensure_camera_symlinks()
-            config = build_config(RUNTIME)
-            if not CONFIG_ANDROID.is_file() or CONFIG_ANDROID.read_text() != config:
-                atomic_write(CONFIG_ANDROID, config)
-            print("%s: Android payload already prepared" % PACKAGE)
-            return 0
-
+    stage = Path(tempfile.mkdtemp(prefix=".hammerhead-image-prep-", dir="/home/waydroid"))
     try:
-        graphics = locate_graphics_archive()
-    except PrepError:
-        if defer_ok:
-            print("%s: proprietary graphics input is not available; preparation deferred" % PACKAGE)
-            return 0
-        raise
-
-    if image_has_loop(SYSTEM_IMAGE) or image_has_loop(VENDOR_IMAGE):
-        raise PrepError("Waydroid image loop attachment already exists; reboot without starting Waydroid and retry")
-
-    RUNTIME_PARENT.mkdir(parents=True, exist_ok=True)
-    stage = RUNTIME_PARENT / (".hammerhead-runtime.new-%d" % os.getpid())
-    if stage.exists():
-        shutil.rmtree(str(stage))
-    stage.mkdir(parents=True)
-    try:
-        open_root = stage / "open"
-        private_root = stage / "private"
-        generated_root = stage / "generated"
-        open_root.mkdir()
-        private_root.mkdir()
-        generated_root.mkdir()
-
-        open_sha = extract_open_payload(open_root)
-        extract_graphics(graphics, private_root)
-        copy_private_jpeg(private_root)
-        copy_private_gnss(private_root)
-
-        with mounted_image(SYSTEM_IMAGE, "system") as system_root:
-            derive_libegl(system_root, generated_root / "system/lib/libEGL.so")
-            prepare_apex(system_root, open_root, generated_root / "system/apex/com.android.media.swcodec")
-
-        with mounted_image(VENDOR_IMAGE, "vendor") as vendor_root:
-            derive_vendor_build_prop(vendor_root, generated_root / "vendor/build.prop")
-            prepare_vintf(vendor_root, open_root, generated_root / "vendor/etc/vintf")
-
-        marker = marker_expected(open_sha, system_id, vendor_id, GRAPHICS_SHA)
-        install_runtime(stage, marker)
-        stage = None
-
+        install_system(system, stage)
+        install_vendor(vendor, stage, graphics)
+        run_fsck(system)
+        run_fsck(vendor)
+        if system.stat().st_size != STOCK_SYSTEM_SIZE:
+            raise PrepError("system.img size changed unexpectedly")
+        if vendor.stat().st_size != FINAL_VENDOR_SIZE:
+            raise PrepError("vendor.img final size mismatch")
+        if not key_hashes_ok(system, vendor):
+            raise PrepError("final Android image key-file verification failed")
+        save_state(system, vendor, open_sha)
+        remove_legacy_runtime()
         ensure_camera_symlinks()
-        atomic_write(CONFIG_ANDROID, build_config(RUNTIME))
-        print("%s: Android payload prepared successfully" % PACKAGE)
-        print("%s: runtime=%s" % (PACKAGE, RUNTIME))
-        print("%s: config=%s" % (PACKAGE, CONFIG_ANDROID))
+        print("%s: Android images prepared successfully" % PACKAGE)
+        print("%s: system.img size=%d sha256=%s" % (PACKAGE, system.stat().st_size, sha256_file(system)))
+        print("%s: vendor.img size=%d sha256=%s" % (PACKAGE, vendor.stat().st_size, sha256_file(vendor)))
         return 0
     finally:
-        if stage is not None and stage.exists():
-            shutil.rmtree(str(stage), ignore_errors=True)
-
-
-def remove_generated():
-    if CONFIG_ANDROID.is_file():
-        try:
-            first = CONFIG_ANDROID.open().readline().rstrip("\n")
-        except OSError:
-            first = ""
-        if first == CONFIG_HEADER:
-            CONFIG_ANDROID.unlink()
-        else:
-            raise PrepError("refusing to remove non-package config_android")
-    if RUNTIME.exists():
-        shutil.rmtree(str(RUNTIME))
-    data, _uid, _gid = camera_data_home()
-    for name in ("cam_socket1", "cam_socket2"):
-        path = data / name
-        target = "host_qcamera/%s" % name
-        if path.is_symlink() and os.readlink(str(path)) == target:
-            path.unlink()
-    print("%s: generated runtime state removed" % PACKAGE)
-    return 0
+        shutil.rmtree(str(stage), ignore_errors=True)
 
 
 def status():
-    print("package=%s" % PACKAGE)
+    print("package=%s schema=%d" % (PACKAGE, SCHEMA))
     print("container_state=%s" % container_state())
-    print("runtime=%s" % ("present" if RUNTIME.is_dir() else "missing"))
-    print("config_android=%s" % ("present" if CONFIG_ANDROID.is_file() else "missing"))
-    marker = load_marker()
-    print("state_schema=%s" % (marker.get("schema") if marker else "missing"))
-    print("runtime_key_hashes=%s" % ("ok" if RUNTIME.is_dir() and runtime_key_hashes_ok() else "not-ok"))
-    candidates = [PROPRIETARY_DIR / GRAPHICS_NAME, Path("/home/defaultuser/Downloads") / GRAPHICS_NAME, Path("/home/defaultuser") / GRAPHICS_NAME]
-    found = False
-    for path in candidates:
-        if path.is_file():
-            found = True
-            print("graphics_archive=%s sha256=%s" % (path, sha256_file(path)))
-    if not found:
-        print("graphics_archive=missing")
+    state = load_state()
+    print("state_file=%s" % ("present" if state else "missing"))
+    for label, link in (("system", SYSTEM_IMAGE_LINK), ("vendor", VENDOR_IMAGE_LINK)):
+        try:
+            path = resolve_image(link)
+            print("%s=%s size=%d sha256=%s" % (label, path, path.stat().st_size, sha256_file(path)))
+        except PrepError:
+            print("%s=missing" % label)
+    print("legacy_runtime=%s" % ("present" if LEGACY_RUNTIME.is_dir() else "absent"))
+    print("legacy_config_android=%s" % ("present" if LEGACY_CONFIG_ANDROID.is_file() else "absent"))
+    return 0
+
+
+def remove_generated():
+    # Image changes are intentionally not reversed on RPM removal. Restoring
+    # pristine images is an explicit re-extraction/setup operation.
+    remove_legacy_runtime()
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser()
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--ensure", action="store_true")
-    group.add_argument("--defer-ok", action="store_true")
-    group.add_argument("--remove", action="store_true")
-    group.add_argument("--status", action="store_true")
+    parser.add_argument("--ensure", action="store_true")
+    parser.add_argument("--defer-ok", action="store_true")
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--remove", action="store_true")
     args = parser.parse_args()
-
-    if os.geteuid() != 0 and not args.status:
-        print("%s: must run as root" % PACKAGE, file=sys.stderr)
-        return 1
-
-    try:
-        if args.remove:
-            return remove_generated()
-        if args.status:
-            return status()
-        return prepare_runtime(bool(args.defer_ok))
-    except PrepError as exc:
-        print("%s: ERROR: %s" % (PACKAGE, exc), file=sys.stderr)
-        return 2
-    except subprocess.CalledProcessError as exc:
-        print("%s: ERROR: command failed: %s" % (PACKAGE, exc), file=sys.stderr)
-        return 3
+    if os.geteuid() != 0:
+        raise PrepError("must run as root")
+    if args.status:
+        return status()
+    if args.remove:
+        return remove_generated()
+    return prepare(args.defer_ok)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        raise SystemExit(main())
+    except PrepError as exc:
+        print("%s: ERROR: %s" % (PACKAGE, exc), file=sys.stderr)
+        raise SystemExit(2)
+    except KeyboardInterrupt:
+        print("%s: interrupted" % PACKAGE, file=sys.stderr)
+        raise SystemExit(130)

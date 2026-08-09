@@ -1,37 +1,38 @@
-# waydroid-android-hammerhead
+# Waydroid Android compatibility package for Hammerhead
 
 Final Android-side compatibility integration for Waydroid on the LG Nexus 5
 (`hammerhead`) Sailfish OS adaptation.
 
 ## Scope
 
-This package is the Android-side companion to `waydroid-config-hammerhead`. It
-contains the final verified redistributable payload for HWC, camera, gralloc,
-Codec2, clean QOMX, GNSS HIDL and networking, plus an idempotent runtime
-preparer.
+This package is the Android-side companion to `waydroid-config-hammerhead`.
+Version 0.3.0 installs the validated Hammerhead compatibility payload directly
+into the checksum-pinned Android 11 images while Waydroid is stopped.
 
-It does **not** rewrite `system.img` or `vendor.img`.  At container startup the
-preparer builds `/home/waydroid/hammerhead-runtime` and writes
-`/etc/waydroid-extra/hammerhead/config_android`; `waydroid-config-hammerhead`
-then includes that LXC fragment.
+The final image policy is deliberately narrow:
 
+- `system.img` is never resized.
+- `vendor.img` is expanded by exactly 128 MiB, from 162459648 to 296677376 bytes.
+- there is no `/home/waydroid/hammerhead-runtime` overlay tree;
+- there is no `config_android` LXC include;
+- there is no per-container-start Android image preparer.
 
 ## Clean installation / pinned Android 11 images
 
-Version 0.2.0 adds the explicit first-time bootstrap command:
+Run as root after placing the exact proprietary graphics archive at:
+
+```text
+/etc/waydroid-extra/hammerhead/proprietary/hammerhead-lineage18.1-graphics-stage.tar.gz
+SHA-256: 12b0ec5a17da018f80ab9ca6341950970e6683b56f28432d909f46d5e3aec4cd
+```
+
+Then run:
 
 ```sh
 waydroid-hammerhead-setup
 ```
 
-Run it as `root` only after the exact proprietary Hammerhead graphics archive
-has been placed at:
-
-```text
-/etc/waydroid-extra/hammerhead/proprietary/hammerhead-lineage18.1-graphics-stage.tar.gz
-```
-
-The setup helper pins the exact Waydroid images used by the Hammerhead port:
+The helper pins these Waydroid images:
 
 ```text
 lineage-18.1-20250510-VANILLA-waydroid_arm-system.zip
@@ -41,139 +42,132 @@ lineage-18.1-20250510-MAINLINE-waydroid_arm-vendor.zip
 SHA-256: 9a40a4e28d2f22ca852709b1dd10e511323ff3b559524393af3c56d9b5aff7cc
 ```
 
-It verifies the extracted stock files as:
+and verifies the pristine extracted images before any modification:
 
 ```text
 system.img
+size: 1210585088
 SHA-256: bc032c68d99078088244ede3fd1316fb600ff09cd36559a4f43964fbdd4d78ff
 
 vendor.img
+size: 162459648
 SHA-256: 5f71b63344d22a1189a8de969137dd07b42edc5ac253545c7596fd0af1c04ec1
 ```
 
-The large images live under:
+The images live under `/home/waydroid/images-lineage18.1-20250510/`; the
+preinstalled-image paths under `/etc/waydroid-extra/images/` are symlinks to
+those files.
 
-```text
-/home/waydroid/images-lineage18.1-20250510/
-```
+The setup helper:
 
-and `/etc/waydroid-extra/images/system.img` and `vendor.img` are symlinks to
-those files. This keeps the large Android images off the Sailfish root
-filesystem while still using Waydroid 1.4.3's recognized preinstalled-image
-path.
-
-The helper then:
-
-1. verifies the required Hammerhead kernel configuration and Binder devices;
+1. verifies the Hammerhead kernel configuration and Binder devices;
 2. stops Waydroid;
-3. downloads/verifies/extracts the exact pinned Android 11 images;
-4. runs `waydroid init -f` through `/etc/waydroid-extra/images`, preventing
-   Waydroid from replacing the pinned images with current OTA images;
-5. pins the proven Android 11 metadata:
-   `system_datetime=1746887715`, `vendor_datetime=1746876991`;
-6. enforces `puddlejumper`, `vndpuddlejumper`, `hwpuddlejumper` and
-   `aidl3/aidl3`;
-7. corrects only the three generated Binder mount sources in `config_nodes`;
-8. runs `waydroid-config-hammerhead` and the Android runtime preparer;
-9. re-verifies the complete `system.img` and `vendor.img` hashes; and
+3. downloads, verifies and extracts the pinned pristine images;
+4. runs `waydroid init -f` through the preinstalled-image path;
+5. pins the proven Android 11 metadata and Hammerhead Binder configuration;
+6. applies `waydroid-config-hammerhead`;
+7. invokes the one-time direct image preparer;
+8. re-runs the host configurator so any legacy `config_android` include is removed;
+9. verifies that system.img retained its stock size and vendor.img reached the exact final size;
 10. leaves Waydroid stopped for the first controlled UI launch.
 
-No `system.img` or `vendor.img` resize is performed. The old development-time
-vendor expansion is obsolete because all Hammerhead additions are supplied as
-external read-only LXC bind mounts.
+## Proven system.img delta
 
-`--status` is read-only:
-
-```sh
-waydroid-hammerhead-setup --status
-```
-
-`--force` permits deliberate reinitialization of an existing Waydroid
-configuration; it is not needed on a clean installation.
-
-## Proprietary material is deliberately not distributed
-
-The GitHub/OBS source and RPM do not contain Qualcomm proprietary graphics,
-legacy JPEG OMX or GNSS/QMI blobs.
-
-JPEG and GNSS/QMI files are copied locally from the installed
-`droid-hal-hammerhead` Android 5.1 adaptation and checksum-validated where a
-production anchor is available.
-
-The Adreno stack must be supplied locally as the exact archive:
+A complete filesystem comparison between the pristine pinned system image and
+the known-working development image found no deletions and only four functional
+changes. Version 0.3.0 reproduces exactly those changes:
 
 ```text
-hammerhead-lineage18.1-graphics-stage.tar.gz
-SHA-256: 12b0ec5a17da018f80ab9ca6341950970e6683b56f28432d909f46d5e3aec4cd
+/system/lib/libEGL.so
+  pristine: 2d40e33fd60cde37118a9e04e1fd9358f28205bd8efa39e7a9be5a1acec6f00e
+  final:    d9ccd264653d2b1b0be206db9b56ed71f4e60cf6a362392b8a6122bdec824645
+
+/system/lib/libsurfaceflinger.so
+  pristine: 4a7bb90839543cc6d1b075e6c57bfce11d9dd13ea835cca27ee0132e999917bf
+  final:    7e19b3f175267e3b97065f8da7ad36379749fbe48f612f8d40d74ec728fd3e8f
+
+/system/etc/init/netd.rc
+  final:    5fe93d766b98496e454f5d923c4662af795825b02f1d627ee57d92d8ebaa0ad4
+
+/system/bin/waydroid-netd-direct-connect.sh
+  final:    36818e6b0f7bd3287f7d67337875a428b088ef4e8c52881f4021db7ed9e783e7
 ```
 
-Preferred device location:
+`libEGL.so` and `libsurfaceflinger.so` are derived locally from the verified
+pristine image with guarded instruction patches and final SHA verification.
+The RPM does not redistribute those modified Android libraries.
+
+The final SurfaceFlinger binary is derived from the pinned pristine binary
+with six guarded byte-range patches:
 
 ```text
-/etc/waydroid-extra/hammerhead/proprietary/hammerhead-lineage18.1-graphics-stage.tar.gz
+0x1164e0  2e    -> 38
+0x1164e2  0024  -> 79a4
+0x1164f8  0c9e  -> 0126
+0x1166c8  00bf  -> 3830
+0x1166cb  bf    -> 00
+0x117bba  18b3  -> 23e0
 ```
 
-The preparer also accepts the exact archive from `/home/defaultuser/Downloads`
-or `/home/defaultuser`.  The archive's `eglsubAndroid.so` is patched locally and
-verified against the final production SHA.
+The first five ranges reproduce the retained EGLConfig compatibility fixes.
+The final `0x117bba` change forces the existing CPU fence-wait fallback.
+Guard bytes and the complete final SHA-256 are verified before installation.
 
-## Image-derived files
+The final system deliberately does **not** install the old development
+`gps.conf`/`flp.conf` copies and does **not** replace the Codec2 APEX utility.
+The known-working system uses the pristine Codec2 utility SHA
+`cfa508060fb0537c1baee3eb1b6eba0570127f86b864158a611a15d1203e35bb`.
 
-The preparer mounts the user's own Waydroid images read-only, only while the
-container is stopped.  It derives:
+## vendor.img
 
-- `system/lib/libEGL.so`: two exact Hammerhead compatibility instruction
-  patches; stock and final SHA-256 identities are enforced.
-- `vendor/build.prop`: adds only `import /vendor/waydroid.prop`; stock and final
-  SHA-256 identities are enforced.
-- `system/apex/com.android.media.swcodec`: copies the complete 99-entry
-  flattened APEX byte-for-byte and replaces only
-  `lib/libsfplugin_ccodec_utils.so` with the verified NV21 fast-path build.
-- `vendor/etc/vintf`: preserves the stock VINTF directory and adds only the
-  Hammerhead GNSS HIDL manifest fragment.
+The vendor filesystem is expanded by exactly 128 MiB and receives the already
+validated HWC, camera, gralloc, QOMX/JPEG, GNSS/QMI and Adreno payload directly.
+Proprietary Qualcomm files are never distributed by this repository or RPM:
+they are copied/derived locally and checksum-validated.
 
-No image is written.
+`vendor/build.prop` receives only:
+
+```text
+import /vendor/waydroid.prop
+```
+
+and the Hammerhead GNSS HIDL manifest is added to the existing VINTF tree.
+
+## No loop-device mutation path
+
+The preparer does not mount Android images and does not create loop devices.
+It uses `debugfs` for ext4 file writes, and `e2fsck`/`resize2fs` only for the
+vendor expansion and filesystem verification. This avoids the old Hammerhead
+kernel's observed delayed loop-device detach behavior.
+
+An interrupted preparation intentionally fails closed on the next run unless
+the recorded image-state file and image hashes match. Re-extract the pinned
+pristine images rather than trying to continue a partially modified image.
 
 ## Camera bridge
 
-`waydroid-config-hammerhead` owns the host `/dev/media*` and `/data` qcamera
-mounts.  This package creates only the two required Android-data symlinks:
+`waydroid-config-hammerhead` owns the host camera/qcamera mounts. This package
+creates only the two Android-data symlinks:
 
 ```text
 cam_socket1 -> host_qcamera/cam_socket1
 cam_socket2 -> host_qcamera/cam_socket2
 ```
 
-## Networking
+## Status
 
-The open payload contains the final Stage98 netd capability workaround and the
-Stage102 priority-23000 direct-connect service.  The obsolete static
-`waydroid-hammerhead-netfix.sh` is intentionally not included.
-
-The kernel-side `FRA_UID_RANGE` support remains part of the Hammerhead kernel
-adaptation and is intentionally outside this RPM.
-
-## Runtime preparation
-
-Normally preparation happens automatically as an `ExecStartPre` of
-`waydroid-container.service`, before the `waydroid-config-hammerhead` drop-in.
-Manual inspection is available with:
+Read-only status:
 
 ```sh
+waydroid-hammerhead-setup --status
 /usr/libexec/waydroid-android-hammerhead/prepare --status
 ```
 
-To prepare manually while Waydroid is stopped:
-
-```sh
-/usr/libexec/waydroid-android-hammerhead/prepare --ensure
-```
-
-The helper refuses to prepare over running/frozen Waydroid or over existing
-Waydroid image loop attachments.
+The direct preparer is normally invoked explicitly by
+`waydroid-hammerhead-setup`; it is no longer an `ExecStartPre` hook.
 
 ## OBS
 
-Push this source tree to GitHub, create `waydroid-android-hammerhead` in the
-Hammerhead adaptation OBS project, and point `_service` at an exact commit.
-The RPM itself is produced by OBS; no locally built RPM is distributed.
+Push the source tree to GitHub, create/update `waydroid-android-hammerhead` in
+the Hammerhead adaptation OBS project, and point `_service` at the exact tested
+commit. The RPM itself is produced by OBS.

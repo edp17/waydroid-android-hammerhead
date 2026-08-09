@@ -1,0 +1,59 @@
+Hammerhead final system.img delta
+=================================
+Pinned pristine image:
+  size:   1210585088
+  sha256: bc032c68d99078088244ede3fd1316fb600ff09cd36559a4f43964fbdd4d78ff
+
+Known-working golden image:
+  size:   1210585088
+  sha256: 1310f2e59810b40098e70d33e0bdf8b87606eafa0e6f41aa2de9a75cb4f168b8
+
+Complete filesystem comparison:
+  golden paths:        4308
+  pristine paths:      4306
+  added in golden:     2
+  missing from golden: 0
+  changed:             3
+
+Functional final changes:
+1. /system/lib/libEGL.so
+   stock: 2d40e33fd60cde37118a9e04e1fd9358f28205bd8efa39e7a9be5a1acec6f00e
+   final: d9ccd264653d2b1b0be206db9b56ed71f4e60cf6a362392b8a6122bdec824645
+   mode: 0644 root:root
+   SELinux: u:object_r:system_lib_file:s0
+
+2. /system/lib/libsurfaceflinger.so
+   stock: 4a7bb90839543cc6d1b075e6c57bfce11d9dd13ea835cca27ee0132e999917bf
+   final: 7e19b3f175267e3b97065f8da7ad36379749fbe48f612f8d40d74ec728fd3e8f
+   mode: 0644 root:root
+   SELinux: u:object_r:system_lib_file:s0
+   pristine -> final byte ranges:
+     0x1164e0: 2e    -> 38
+     0x1164e2: 0024  -> 79a4
+     0x1164f8: 0c9e  -> 0126
+     0x1166c8: 00bf  -> 3830
+     0x1166cb: bf    -> 00
+     0x117bba: 18b3  -> 23e0
+   The first five ranges are the retained EGLConfig fixes.
+   The final range is the CPU fence-wait fallback fix.
+
+3. /system/etc/init/netd.rc
+   pristine: c558bb07806b29035f4d1093422c0e2afc574d3d15aa27654c3525cf8f2ac4cc
+   final:    5fe93d766b98496e454f5d923c4662af795825b02f1d627ee57d92d8ebaa0ad4
+   mode: 0644 root:root
+   SELinux xattr: none in golden
+
+4. /system/bin/waydroid-netd-direct-connect.sh
+   final: 36818e6b0f7bd3287f7d67337875a428b088ef4e8c52881f4021db7ed9e783e7
+   mode: 0755 root:shell (gid 2000)
+   SELinux xattr: none in golden
+
+Non-functional extra in golden, deliberately excluded:
+  /system/etc/init/netd.rc.before-stage95-20260714-163835
+
+Confirmed unchanged/absent:
+- Camera2 is pristine stock content.
+- com.android.media.swcodec/lib/libsfplugin_ccodec_utils.so remains stock SHA
+  cfa508060fb0537c1baee3eb1b6eba0570127f86b864158a611a15d1203e35bb.
+- /system/etc/gps.conf absent in both images.
+- /system/etc/flp.conf absent in both images.

@@ -1,0 +1,30 @@
+service netd /system/bin/netd
+    class main
+    # Stage98: explicit capabilities disabled on the old hammerhead kernel
+    # The root netd service inherits the LXC-kept capability set instead.
+    socket dnsproxyd stream 0660 root inet
+    socket mdns stream 0660 root system
+    socket fwmarkd stream 0660 root inet
+    onrestart restart zygote
+    onrestart restart zygote_secondary
+    # b/121354779: netd itself is not updatable, but on startup it dlopen()s the resolver library
+    # from the DNS resolver APEX. Mark it as updatable so init won't start it until all APEX
+    # packages are ready.
+    updatable
+
+
+
+
+
+
+# BEGIN Stage102 old-kernel direct-connect compatibility
+on property:init.svc.netd=running
+    start waydroid_netd_direct_connect
+
+service waydroid_netd_direct_connect /system/bin/sh /system/bin/waydroid-netd-direct-connect.sh
+    class main
+    user root
+    group root system inet
+    disabled
+    oneshot
+# END Stage102 old-kernel direct-connect compatibility

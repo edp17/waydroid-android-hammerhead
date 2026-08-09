@@ -6,14 +6,15 @@ This helper is intentionally explicit. It downloads the exact validated
 LineageOS 18.1 / Android 11 Waydroid images from Waydroid's official archive,
 verifies both ZIPs and extracted images, initializes Waydroid through its
 preinstalled-image path, reapplies the Hammerhead host configuration, prepares
-the Android compatibility runtime, and leaves Waydroid stopped.
+the Android images while Waydroid is stopped, and leaves Waydroid stopped.
 
-It never resizes or writes system.img/vendor.img after extraction.
+system.img keeps its pinned size; vendor.img is expanded by exactly 128 MiB.
 """
 
 import argparse
 import configparser
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -55,6 +56,7 @@ VENDOR_IMAGE_SHA = "5f71b63344d22a1189a8de969137dd07b42edc5ac253545c7596fd0af1c0
 
 SYSTEM_IMAGE_SIZE = 1210585088
 VENDOR_IMAGE_SIZE = 162459648
+FINAL_VENDOR_IMAGE_SIZE = 296677376
 
 SYSTEM_DATETIME = "1746887715"
 VENDOR_DATETIME = "1746876991"
@@ -71,6 +73,7 @@ LXC_CONFIG = Path("/var/lib/waydroid/lxc/waydroid/config")
 
 CONFIG_HELPER = Path("/usr/libexec/waydroid-config-hammerhead/configure")
 PREPARE_HELPER = Path("/usr/libexec/waydroid-android-hammerhead/prepare")
+IMAGE_STATE = Path("/home/waydroid/.hammerhead-image-state.json")
 
 GRAPHICS_NAME = "hammerhead-lineage18.1-graphics-stage.tar.gz"
 GRAPHICS_SHA = "12b0ec5a17da018f80ab9ca6341950970e6683b56f28432d909f46d5e3aec4cd"
@@ -213,8 +216,8 @@ def free_bytes(path):
 
 def ensure_free_space():
     # Peak usage occurs while system.zip and extracted system.img coexist.
-    # Add 256 MiB margin for metadata/runtime work.
-    required = SYSTEM_ZIP_SIZE + SYSTEM_IMAGE_SIZE + (256 * 1024 * 1024)
+    # Add 384 MiB margin for vendor expansion and image preparation.
+    required = SYSTEM_ZIP_SIZE + SYSTEM_IMAGE_SIZE + (384 * 1024 * 1024)
     free = free_bytes(Path("/home/waydroid"))
     say("home_free_bytes=%d" % free)
     say("minimum_setup_free_bytes=%d" % required)
@@ -256,7 +259,7 @@ def download_with_urllib(url, dst):
     say("Downloading with Python urllib: %s" % url)
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "waydroid-android-hammerhead/0.2.0"},
+        headers={"User-Agent": "waydroid-android-hammerhead/0.3.0"},
     )
     with urllib.request.urlopen(req, timeout=60) as response, open(str(tmp), "wb") as out:
         total = response.headers.get("Content-Length")
@@ -367,6 +370,33 @@ def extract_single_image(zip_path, image_basename, final_path, expected_sha, exp
     say("image_sha256=%s" % digest)
 
 
+def prepared_state_matches(system, vendor):
+    if not IMAGE_STATE.is_file():
+        return False
+
+    try:
+        state = json.loads(IMAGE_STATE.read_text())
+    except Exception:
+        return False
+
+    if state.get("schema") != 2:
+        return False
+
+    try:
+        return (
+            state["system"]["path"] == str(system) and
+            state["system"]["size"] == SYSTEM_IMAGE_SIZE and
+            system.stat().st_size == SYSTEM_IMAGE_SIZE and
+            state["system"]["sha256"] == sha256_file(system) and
+            state["vendor"]["path"] == str(vendor) and
+            state["vendor"]["size"] == FINAL_VENDOR_IMAGE_SIZE and
+            vendor.stat().st_size == FINAL_VENDOR_IMAGE_SIZE and
+            state["vendor"]["sha256"] == sha256_file(vendor) and
+            state.get("graphics_archive_sha256") == GRAPHICS_SHA
+        )
+    except (KeyError, OSError):
+        return False
+
 def ensure_images():
     say("=== pinned Android 11 images ===")
     IMAGE_STORE.mkdir(parents=True, exist_ok=True)
@@ -375,26 +405,57 @@ def ensure_images():
     system = IMAGE_STORE / "system.img"
     vendor = IMAGE_STORE / "vendor.img"
 
+    # A completed 0.3.0 preparation intentionally changes both image hashes.
+    # Accept them only when the root-owned preparation state records these
+    # exact paths, sizes, and current full-image hashes.
+    if system.is_file() and vendor.is_file():
+        if prepared_state_matches(system, vendor):
+            say("reusing verified prepared system.img: %s" % system)
+            say("reusing verified prepared vendor.img: %s" % vendor)
+            return system, vendor
+
+    # A mixed pair is never valid for setup. Do not silently replace one half.
+    if system.is_file() != vendor.is_file():
+        raise SetupError(
+            "only one Android image exists; restore/remove the pair together "
+            "before setup"
+        )
+
     if not system.is_file():
-        z = ensure_zip(SYSTEM_NAME, SYSTEM_URL, SYSTEM_ZIP_SHA, SYSTEM_ZIP_SIZE)
-        extract_single_image(z, "system.img", system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE)
+        z = ensure_zip(
+            SYSTEM_NAME, SYSTEM_URL, SYSTEM_ZIP_SHA, SYSTEM_ZIP_SIZE
+        )
+        extract_single_image(
+            z, "system.img", system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE
+        )
         z.unlink()
         say("removed verified system ZIP after extraction")
     else:
+        # extract_single_image() accepts an existing exact pristine image.
         extract_single_image(
-            DOWNLOAD_DIR / SYSTEM_NAME, "system.img", system,
-            SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE
+            DOWNLOAD_DIR / SYSTEM_NAME,
+            "system.img",
+            system,
+            SYSTEM_IMAGE_SHA,
+            SYSTEM_IMAGE_SIZE,
         )
 
     if not vendor.is_file():
-        z = ensure_zip(VENDOR_NAME, VENDOR_URL, VENDOR_ZIP_SHA, VENDOR_ZIP_SIZE)
-        extract_single_image(z, "vendor.img", vendor, VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE)
+        z = ensure_zip(
+            VENDOR_NAME, VENDOR_URL, VENDOR_ZIP_SHA, VENDOR_ZIP_SIZE
+        )
+        extract_single_image(
+            z, "vendor.img", vendor, VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE
+        )
         z.unlink()
         say("removed verified vendor ZIP after extraction")
     else:
         extract_single_image(
-            DOWNLOAD_DIR / VENDOR_NAME, "vendor.img", vendor,
-            VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE
+            DOWNLOAD_DIR / VENDOR_NAME,
+            "vendor.img",
+            vendor,
+            VENDOR_IMAGE_SHA,
+            VENDOR_IMAGE_SIZE,
         )
 
     verify_image(system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE, "system")
@@ -621,20 +682,25 @@ def verify_cfg_and_nodes():
             raise SetupError("config_nodes missing exact Binder mount: %s" % line)
 
 
-def prepare_runtime():
-    say("=== prepare Hammerhead Android runtime overlays ===")
+def prepare_images():
+    say("=== prepare Hammerhead Android images ===")
     if not PREPARE_HELPER.is_file():
-        raise SetupError("missing runtime preparer: %s" % PREPARE_HELPER)
+        raise SetupError("missing image preparer: %s" % PREPARE_HELPER)
     run([str(PREPARE_HELPER), "--ensure"])
-    # Re-run host configurator now that config_android exists so it gets
-    # included in the generated main LXC config.
+    # The 0.3 configurator permanently strips the obsolete config_android
+    # include after the payload has been installed directly into the images.
     call_config_helper()
 
 
-def verify_images_unchanged(system, vendor):
-    say("=== verify stock images remained byte-identical ===")
-    verify_image(system, SYSTEM_IMAGE_SHA, SYSTEM_IMAGE_SIZE, "system_after")
-    verify_image(vendor, VENDOR_IMAGE_SHA, VENDOR_IMAGE_SIZE, "vendor_after")
+def verify_prepared_images(system, vendor):
+    say("=== verify prepared image sizes ===")
+    if system.stat().st_size != SYSTEM_IMAGE_SIZE:
+        raise SetupError("system.img was resized unexpectedly")
+    if vendor.stat().st_size != FINAL_VENDOR_IMAGE_SIZE:
+        raise SetupError("vendor.img size=%d expected=%d" %
+                         (vendor.stat().st_size, FINAL_VENDOR_IMAGE_SIZE))
+    say("system_after size=%d sha256=%s" % (system.stat().st_size, sha256_file(system)))
+    say("vendor_after size=%d sha256=%s" % (vendor.stat().st_size, sha256_file(vendor)))
 
 
 def status():
@@ -652,9 +718,11 @@ def status():
             say("%s=missing" % label)
     say("waydroid_cfg=%s" % ("present" if WAYDROID_CFG.is_file() else "missing"))
     say("config_nodes=%s" % ("present" if CONFIG_NODES.is_file() else "missing"))
-    say("runtime=%s" % ("present" if Path("/home/waydroid/hammerhead-runtime").is_dir() else "missing"))
-    say("config_android=%s" % (
-        "present" if Path("/etc/waydroid-extra/hammerhead/config_android").is_file() else "missing"
+    state = Path("/home/waydroid/.hammerhead-image-state.json")
+    say("image_state=%s" % ("present" if state.is_file() else "missing"))
+    say("legacy_runtime=%s" % ("present" if Path("/home/waydroid/hammerhead-runtime").is_dir() else "absent"))
+    say("legacy_config_android=%s" % (
+        "present" if Path("/etc/waydroid-extra/hammerhead/config_android").is_file() else "absent"
     ))
     for p in GRAPHICS_CANDIDATES:
         if p.is_file():
@@ -681,7 +749,7 @@ def main():
     say("=== Hammerhead Waydroid clean setup ===")
     say("Pinned system: %s" % SYSTEM_NAME)
     say("Pinned vendor: %s" % VENDOR_NAME)
-    say("No Android image will be resized or modified after extraction.")
+    say("system.img keeps its pinned size; vendor.img will grow by exactly 128 MiB.")
 
     ensure_stopped()
     check_kernel()
@@ -692,9 +760,6 @@ def main():
     ensure_preinstalled_links(system, vendor)
     reject_loops(system, vendor)
 
-    before_system = sha256_file(system)
-    before_vendor = sha256_file(vendor)
-
     run_waydroid_init(args.force)
 
     # Apply the package-owned host profile, then pin fields which preinstalled
@@ -703,12 +768,9 @@ def main():
     pin_cfg_metadata_and_binders()
     verify_cfg_and_nodes()
 
-    prepare_runtime()
+    prepare_images()
     verify_cfg_and_nodes()
-
-    if sha256_file(system) != before_system or sha256_file(vendor) != before_vendor:
-        raise SetupError("Waydroid images changed during initialization/preparation")
-    verify_images_unchanged(system, vendor)
+    verify_prepared_images(system, vendor)
 
     ensure_stopped()
 
@@ -716,7 +778,8 @@ def main():
     say("=== Hammerhead Waydroid setup complete ===")
     say("system.img=%s" % system)
     say("vendor.img=%s" % vendor)
-    say("images are stock, checksum-pinned, and unmodified")
+    say("system.img is checksum-pinned then patched in-place without resizing")
+    say("vendor.img is checksum-pinned, expanded by 128 MiB, and patched in-place")
     say("Waydroid is intentionally left stopped.")
     say("Start the first UI test manually as defaultuser with:")
     say("  waydroid show-full-ui")
