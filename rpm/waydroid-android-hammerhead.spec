@@ -1,5 +1,5 @@
 Name:           waydroid-android-hammerhead
-Version:        0.3.0
+Version:        0.3.1
 Release:        1
 Summary:        Android-side Hammerhead compatibility payload for Waydroid
 License:        Apache-2.0 AND BSD-3-Clause AND MIT

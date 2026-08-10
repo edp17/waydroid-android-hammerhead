@@ -6,7 +6,7 @@ Final Android-side compatibility integration for Waydroid on the LG Nexus 5
 ## Scope
 
 This package is the Android-side companion to `waydroid-config-hammerhead`.
-Version 0.3.0 installs the validated Hammerhead compatibility payload directly
+Version 0.3.1 installs the validated Hammerhead compatibility payload directly
 into the checksum-pinned Android 11 images while Waydroid is stopped.
 
 The final image policy is deliberately narrow:
@@ -75,7 +75,7 @@ The setup helper:
 
 A complete filesystem comparison between the pristine pinned system image and
 the known-working development image found no deletions and only four functional
-changes. Version 0.3.0 reproduces exactly those changes:
+changes. Version 0.3.1 reproduces exactly those changes:
 
 ```text
 /system/lib/libEGL.so
