@@ -6,7 +6,7 @@ Final Android-side compatibility integration for Waydroid on the LG Nexus 5
 ## Scope
 
 This package is the Android-side companion to `waydroid-config-hammerhead`.
-Version 0.3.2 installs the validated Hammerhead compatibility payload directly
+Version 0.3.3 installs the validated Hammerhead compatibility payload directly
 into the checksum-pinned Android 11 images while Waydroid is stopped.
 
 The final image policy is deliberately narrow:
@@ -69,13 +69,14 @@ The setup helper:
 7. invokes the one-time direct image preparer;
 8. re-runs the host configurator so any legacy `config_android` include is removed;
 9. verifies that system.img retained its stock size and vendor.img reached the exact final size;
-10. leaves Waydroid stopped for the first controlled UI launch.
+10. leaves Waydroid stopped and requires a device reboot before the first
+    Waydroid UI start.
 
 ## Proven system.img delta
 
 A complete filesystem comparison between the pristine pinned system image and
 the known-working development image found no deletions and only four functional
-changes. Version 0.3.2 reproduces exactly those changes:
+changes. Those four baseline changes remain unchanged in Version 0.3.3:
 
 ```text
 /system/lib/libEGL.so
@@ -92,6 +93,30 @@ changes. Version 0.3.2 reproduces exactly those changes:
 /system/bin/waydroid-netd-direct-connect.sh
   final:    36818e6b0f7bd3287f7d67337875a428b088ef4e8c52881f4021db7ed9e783e7
 ```
+
+Version 0.3.3 additionally installs two package-owned first-boot files:
+
+```text
+/system/etc/init/waydroid-hammerhead-ui-defaults.rc
+  final:    1aaaa60464fd2d58911070356f4df571d550169f67f4d9d4cf59dac88abb01c5
+
+/system/bin/waydroid-hammerhead-ui-defaults.sh
+  final:    c659feb6bc68d411308c8457b7626a3479e74673057323413a6ddd8e044d0ae6
+```
+
+On the first completed Android boot for a new Waydroid data set, the helper
+applies the validated Hammerhead UI defaults:
+
+```text
+font_scale=0.85
+display_density_forced=336
+window_animation_scale=0.0
+transition_animation_scale=0.0
+animator_duration_scale=0.0
+```
+
+A marker is written only after all five values read back successfully. Later
+boots leave user changes untouched.
 
 `libEGL.so` and `libsurfaceflinger.so` are derived locally from the verified
 pristine image with guarded instruction patches and final SHA verification.

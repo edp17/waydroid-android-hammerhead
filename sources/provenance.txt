@@ -1,4 +1,4 @@
-waydroid-android-hammerhead 0.3.2 provenance
+waydroid-android-hammerhead 0.3.3 provenance
 
 Final open Android payload collection
 -------------------------------------
@@ -30,6 +30,33 @@ The build retains the final fullscreen, rotation, buffer-damage and explicit
 buffer-lifetime synchronization work. It also restores Hammerhead-compatible
 SHM memfd flags and makes partial SHM-buffer construction fail safely instead
 of taking down the composer.
+
+Hammerhead first-boot Android UI defaults
+-----------------------------------------
+Version 0.3.3 adds two package-owned system-image files:
+
+  /system/etc/init/waydroid-hammerhead-ui-defaults.rc
+  SHA-256:
+  1aaaa60464fd2d58911070356f4df571d550169f67f4d9d4cf59dac88abb01c5
+
+  /system/bin/waydroid-hammerhead-ui-defaults.sh
+  SHA-256:
+  c659feb6bc68d411308c8457b7626a3479e74673057323413a6ddd8e044d0ae6
+
+After sys.boot_completed=1, the oneshot helper applies exactly once per
+Waydroid data set:
+
+  font_scale=0.85
+  display_density_forced=336
+  window_animation_scale=0.0
+  transition_animation_scale=0.0
+  animator_duration_scale=0.0
+
+Successful readback creates:
+  /data/local/tmp/.waydroid-hammerhead-ui-defaults-v1
+
+Subsequent boots exit immediately when that marker exists, so later user
+changes are not enforced or overwritten.
 
 Runtime-validated clean QOMX:
   libqomx_core.so

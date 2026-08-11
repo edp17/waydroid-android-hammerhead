@@ -1,5 +1,5 @@
 Name:           waydroid-android-hammerhead
-Version:        0.3.2
+Version:        0.3.3
 Release:        1
 Summary:        Android-side Hammerhead compatibility payload for Waydroid
 License:        Apache-2.0 AND BSD-3-Clause AND MIT
@@ -46,6 +46,10 @@ install -D -m 0644 payload/system/netd.rc \
     %{buildroot}%{_datadir}/%{name}/system/netd.rc
 install -D -m 0644 payload/system/waydroid-netd-direct-connect.sh \
     %{buildroot}%{_datadir}/%{name}/system/waydroid-netd-direct-connect.sh
+install -D -m 0644 payload/system/waydroid-hammerhead-ui-defaults.rc \
+    %{buildroot}%{_datadir}/%{name}/system/waydroid-hammerhead-ui-defaults.rc
+install -D -m 0644 payload/system/waydroid-hammerhead-ui-defaults.sh \
+    %{buildroot}%{_datadir}/%{name}/system/waydroid-hammerhead-ui-defaults.sh
 
 install -D -m 0755 scripts/prepare \
     %{buildroot}%{_libexecdir}/%{name}/prepare
@@ -81,6 +85,8 @@ fi
 %{_datadir}/%{name}/open-payload.sha256
 %{_datadir}/%{name}/system/netd.rc
 %{_datadir}/%{name}/system/waydroid-netd-direct-connect.sh
+%{_datadir}/%{name}/system/waydroid-hammerhead-ui-defaults.rc
+%{_datadir}/%{name}/system/waydroid-hammerhead-ui-defaults.sh
 %{_libexecdir}/%{name}/prepare
 %{_sbindir}/waydroid-hammerhead-setup
 %dir %{_sysconfdir}/waydroid-extra/hammerhead/proprietary

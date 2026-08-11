@@ -781,7 +781,8 @@ def main():
     say("system.img is checksum-pinned then patched in-place without resizing")
     say("vendor.img is checksum-pinned, expanded by 128 MiB, and patched in-place")
     say("Waydroid is intentionally left stopped.")
-    say("Start the first UI test manually as defaultuser with:")
+    say("Reboot the device before starting Waydroid for the first time.")
+    say("After reboot, start the UI as defaultuser if needed with:")
     say("  waydroid show-full-ui")
     return 0
 

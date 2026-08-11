@@ -56,6 +56,8 @@ STOCK_SURFACEFLINGER_SHA = "4a7bb90839543cc6d1b075e6c57bfce11d9dd13ea835cca27ee0
 FINAL_SURFACEFLINGER_SHA = "7e19b3f175267e3b97065f8da7ad36379749fbe48f612f8d40d74ec728fd3e8f"
 FINAL_NETD_SHA = "5fe93d766b98496e454f5d923c4662af795825b02f1d627ee57d92d8ebaa0ad4"
 FINAL_DIRECT_CONNECT_SHA = "36818e6b0f7bd3287f7d67337875a428b088ef4e8c52881f4021db7ed9e783e7"
+FINAL_UI_DEFAULTS_RC_SHA = "1aaaa60464fd2d58911070356f4df571d550169f67f4d9d4cf59dac88abb01c5"
+FINAL_UI_DEFAULTS_SH_SHA = "c659feb6bc68d411308c8457b7626a3479e74673057323413a6ddd8e044d0ae6"
 STOCK_VENDOR_BUILD_PROP_SHA = "95faafcd231ff1b3f6720f20e0a9cf29b9147d516a6b773c09d85b5fd54d8677"
 FINAL_VENDOR_BUILD_PROP_SHA = "462bb4320ce30c280f7c68b19b8034748ca65e7709a7f7d8401f0d480028121c"
 VENDOR_IMPORT_BLOCK = ("\n# Hammerhead: load host-generated Waydroid runtime properties\n"
@@ -602,10 +604,20 @@ def install_system(system, stage):
     libegl, sf = derive_system_files(system, stage / "derived-system")
     netd = SYSTEM_PAYLOAD_DIR / "netd.rc"
     direct = SYSTEM_PAYLOAD_DIR / "waydroid-netd-direct-connect.sh"
+    ui_defaults_rc = SYSTEM_PAYLOAD_DIR / "waydroid-hammerhead-ui-defaults.rc"
+    ui_defaults_sh = SYSTEM_PAYLOAD_DIR / "waydroid-hammerhead-ui-defaults.sh"
+
     if not netd.is_file() or sha256_file(netd) != FINAL_NETD_SHA:
         raise PrepError("packaged final netd.rc identity mismatch")
     if not direct.is_file() or sha256_file(direct) != FINAL_DIRECT_CONNECT_SHA:
         raise PrepError("packaged direct-connect helper identity mismatch")
+    if (not ui_defaults_rc.is_file()
+            or sha256_file(ui_defaults_rc) != FINAL_UI_DEFAULTS_RC_SHA):
+        raise PrepError("packaged UI-defaults init identity mismatch")
+    if (not ui_defaults_sh.is_file()
+            or sha256_file(ui_defaults_sh) != FINAL_UI_DEFAULTS_SH_SHA):
+        raise PrepError("packaged UI-defaults helper identity mismatch")
+
     debugfs_replace(system, "/system/lib/libEGL.so", libegl, FINAL_LIBEGL_SHA,
                     0o644, 0, 0, SYSTEM_LIB_CONTEXT)
     debugfs_replace(system, "/system/lib/libsurfaceflinger.so", sf,
@@ -614,6 +626,16 @@ def install_system(system, stage):
                     0o644, 0, 0, None)
     debugfs_replace(system, "/system/bin/waydroid-netd-direct-connect.sh", direct,
                     FINAL_DIRECT_CONNECT_SHA, 0o755, 0, 2000, None)
+    debugfs_replace(
+        system,
+        "/system/etc/init/waydroid-hammerhead-ui-defaults.rc",
+        ui_defaults_rc, FINAL_UI_DEFAULTS_RC_SHA,
+        0o644, 0, 0, None)
+    debugfs_replace(
+        system,
+        "/system/bin/waydroid-hammerhead-ui-defaults.sh",
+        ui_defaults_sh, FINAL_UI_DEFAULTS_SH_SHA,
+        0o755, 0, 2000, None)
 
 
 def vendor_specs(open_root, private_root, build_prop):
@@ -697,6 +719,10 @@ def key_hashes_ok(system, vendor):
         (system, "/system/lib/libsurfaceflinger.so", FINAL_SURFACEFLINGER_SHA),
         (system, "/system/etc/init/netd.rc", FINAL_NETD_SHA),
         (system, "/system/bin/waydroid-netd-direct-connect.sh", FINAL_DIRECT_CONNECT_SHA),
+        (system, "/system/etc/init/waydroid-hammerhead-ui-defaults.rc",
+         FINAL_UI_DEFAULTS_RC_SHA),
+        (system, "/system/bin/waydroid-hammerhead-ui-defaults.sh",
+         FINAL_UI_DEFAULTS_SH_SHA),
         (vendor, "/lib/hw/hwcomposer.waydroid.so", OPEN_REQUIRED_VENDOR["vendor/lib/hw/hwcomposer.waydroid.so"]),
         (vendor, "/lib/hw/camera.hammerhead.so", OPEN_REQUIRED_VENDOR["vendor/lib/hw/camera.hammerhead.so"]),
         (vendor, "/lib/hw/gralloc.msm8974.so", OPEN_REQUIRED_VENDOR["vendor/lib/hw/gralloc.msm8974.so"]),
