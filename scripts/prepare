@@ -62,7 +62,7 @@ VENDOR_IMPORT_BLOCK = ("\n# Hammerhead: load host-generated Waydroid runtime pro
                        "import /vendor/waydroid.prop\n")
 
 OPEN_REQUIRED_VENDOR = {
-    "vendor/lib/hw/hwcomposer.waydroid.so": "caba8145a933eed838fda0fecbfad01bf0c1349d7c47f33bf87ca7fc0d07ee12",
+    "vendor/lib/hw/hwcomposer.waydroid.so": "4c1812d158384016f45b9df936165ea25238b3ba06434a2ede3859115eaab393",
     "vendor/lib/hw/camera.hammerhead.so": "af2f30771cc857c4401a1835d95a95164267018aca6f18224a9a766c9d7ac8af",
     "vendor/lib/hw/gralloc.msm8974.so": "c845d01983fd2340c0a82108f4d6bdb65f928c2c452ab0f3f10e5395fff28757",
     "vendor/lib/libmmcamera_interface.so": "e3e4bfbcc08f1db912fcc33473b70b03d89e7ebf2714767d453841f7c5680897",

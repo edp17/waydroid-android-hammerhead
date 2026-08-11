@@ -15,13 +15,8 @@ lineage-18.1
 
 ===== hardware/waydroid =====
 hwc-stable-v8
-65c9622d218d318f2c5a08f9d69b18323e944426
+02c80df743eeff5a98090be9cfbe4cb6c01b8a56
 ## hwc-stable-v8...edp17/hwc-stable-v8
- M hwcomposer/gralloc_handler.cpp
- M hwcomposer/hwcomposer.cpp
- M hwcomposer/wayland-hwc.cpp
- M hwcomposer/wayland-hwc.h
-
 ===== frameworks/av =====
 18186d8f9b4dcaff242ae9ea9b74e6827f14a1cc
 ## HEAD (no branch)

@@ -1,4 +1,4 @@
-waydroid-android-hammerhead 0.2.0 provenance
+waydroid-android-hammerhead 0.3.2 provenance
 
 Final open Android payload collection
 -------------------------------------
@@ -8,14 +8,28 @@ Collection archive SHA-256:
 Key source states:
   device/lge/hammerhead     7b2476c70c15151c9af4fc112c133f914cd7e90d
   hardware/qcom/display     818ef15669802f4e2ccbbd5a8d806f6ef7a12a5e
-  hardware/waydroid         65c9622d218d318f2c5a08f9d69b18323e944426 (hwc-stable-v8)
+  hardware/waydroid         02c80df743eeff5a98090be9cfbe4cb6c01b8a56 (hwc-stable-v8)
   frameworks/av             18186d8f9b4dcaff242ae9ea9b74e6827f14a1cc
   hardware/interfaces       a3183db29b7a57de9da42ec82b7a67ce49c0c68d
   system/netd               c013516ff3b78598cbab7e1d0b86583732273b8f
 
-Some final source changes were uncommitted in the Android checkout when the
-payload was frozen.  repository-state.txt and source-diffs.patch capture the
-exact source delta used for the verified binaries.
+Some final source changes outside hardware/waydroid were uncommitted in the
+Android checkout when the base payload was frozen. repository-state.txt and
+source-diffs.patch retain those source deltas. The final Hammerhead HWC state
+is now committed at the hardware/waydroid revision above.
+
+Hammerhead HWC production update
+--------------------------------
+Version 0.3.2 replaces the HWC member from the base open payload with the
+runtime-validated crash-safe build:
+
+  hwcomposer.waydroid.so
+  4c1812d158384016f45b9df936165ea25238b3ba06434a2ede3859115eaab393
+
+The build retains the final fullscreen, rotation, buffer-damage and explicit
+buffer-lifetime synchronization work. It also restores Hammerhead-compatible
+SHM memfd flags and makes partial SHM-buffer construction fail safely instead
+of taking down the composer.
 
 Runtime-validated clean QOMX:
   libqomx_core.so
@@ -73,9 +87,10 @@ Vendor:
   OTA datetime: 1746876991
 
 The setup helper stores these stock images under /home/waydroid and exposes
-them through /etc/waydroid-extra/images symlinks. It never resizes or writes
-either image after extraction. Whole-image hashes are checked again after
-Waydroid initialization and Hammerhead runtime preparation.
+them through /etc/waydroid-extra/images symlinks. The direct preparer patches
+system.img in-place without resizing it and expands vendor.img by exactly
+128 MiB before installing the validated Hammerhead payload. Prepared-image
+state and key file identities are verified before reuse.
 
 Final Hammerhead kernel source
 ------------------------------
